@@ -4,6 +4,14 @@ This directory contains detailed documentation about the hBehaveMAE model archit
 
 ## Available Documentation
 
+### 🚀 [Quick Reference](quick_reference.md)
+**One-page summary!** Quick overview with key concepts:
+- Journey of data through the model
+- What tokens and q_stride are
+- Receptive field growth
+- Why this architecture works
+- Common questions answered
+
 ### 📘 [Data Propagation Guide](data_propagation_guide.md)
 **Start here!** Comprehensive explanation of how data propagates through the hBehaveMAE model, including:
 - What tokens are and how they're created
@@ -80,10 +88,11 @@ The hBehaveMAE model is a hierarchical masked autoencoder designed for behaviora
 
 ## How to Use This Documentation
 
-1. **New to the model?** Start with [Data Propagation Guide](data_propagation_guide.md)
-2. **Want visual intuition?** Check [Visual Data Flow Diagram](visual_data_flow.md)
-3. **Need exact shapes?** See [Detailed Tensor Shapes](tensor_shapes_detailed.md)
-4. **Working with different configs?** Run [Demo Script](demo_data_propagation.py)
+1. **New to the model?** Start with [Quick Reference](quick_reference.md) for overview
+2. **Want detailed explanation?** Read [Data Propagation Guide](data_propagation_guide.md)
+3. **Want visual intuition?** Check [Visual Data Flow Diagram](visual_data_flow.md)
+4. **Need exact shapes?** See [Detailed Tensor Shapes](tensor_shapes_detailed.md)
+5. **Working with different configs?** Run [Demo Script](demo_data_propagation.py)
 
 ## Questions?
 
