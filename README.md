@@ -45,6 +45,9 @@ The easiest way to set up the environment is by using the provided `environment.
 
 For downloading and preparing the three benchmarks Shot7M2 ([download here 🏀](https://huggingface.co/datasets/amathislab/SHOT7M2)), hBABEL, and MABe22 we compiled detailed instructions in the [datasets README](datasets/README.md).
 
+## 📖 Model Documentation
+
+For a detailed explanation of how data propagates through the hBehaveMAE model, including token definitions, q_stride effects on pooling and receptive fields, see our [Data Propagation Guide](docs/data_propagation_guide.md).
 
 ## 🔄 Pre-training
 
