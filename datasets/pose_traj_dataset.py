@@ -309,15 +309,38 @@ class BasePoseTrajDataset(torch.utils.data.Dataset):
 
         return feats
 
-    def prepare_subsequence_sample(self, sequence: np.ndarray):
+    def scale_subsequence(self, sequence: np.ndarray, seq_idx: int) -> np.ndarray:
+        """
+        Scale sequence by per-sequence scale factor (if available).
+        Override in subclasses to implement custom scaling.
+        
+        Args:
+            sequence: Keypoints array [num_frames, features]
+            seq_idx: Index of the source sequence
+            
+        Returns:
+            Scaled sequence
+        """
+        # Default: no scaling
+        return sequence
+
+    def prepare_subsequence_sample(self, sequence: np.ndarray, seq_idx: int = None):
         """
         Returns a training sample
+        
+        Args:
+            sequence: Keypoints array [num_frames, features]
+            seq_idx: Index of the source sequence (for per-sequence scaling)
         """
 
         if self.augmentations:
             sequence = sequence.reshape(self.max_keypoints_len, *self.KEYFRAME_SHAPE)
             sequence = self.augmentations(sequence)
             sequence = sequence.reshape(self.max_keypoints_len, -1)
+
+        # Apply per-sequence scaling after augmentation
+        if seq_idx is not None:
+            sequence = self.scale_subsequence(sequence, seq_idx)
 
         feats = self.featurise_keypoints(sequence)
 
@@ -329,9 +352,10 @@ class BasePoseTrajDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx: int):
 
         subseq_ix = self.keypoints_ids[idx]
+        seq_idx = subseq_ix[0]  # Sequence index
         subsequence = self.seq_keypoints[
-            subseq_ix[0], subseq_ix[1] : subseq_ix[1] + self.max_keypoints_len
+            seq_idx, subseq_ix[1] : subseq_ix[1] + self.max_keypoints_len
         ]
-        inputs = self.prepare_subsequence_sample(subsequence)
+        inputs = self.prepare_subsequence_sample(subsequence, seq_idx=seq_idx)
 
         return inputs, []
