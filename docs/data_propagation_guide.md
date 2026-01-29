@@ -2,6 +2,12 @@
 
 This document provides a comprehensive explanation of how data propagates through the hBehaveMAE (Hierarchical Behavior Masked Autoencoder) model, with specific focus on the configuration parameters provided.
 
+## Additional Resources
+
+- **[Visual Data Flow Diagram](visual_data_flow.md)**: ASCII art diagrams showing data flow and transformations
+- **[Detailed Tensor Shapes](tensor_shapes_detailed.md)**: Block-by-block tensor shape transformations
+- **[Demo Script](demo_data_propagation.py)**: Executable Python script that calculates and displays data flow for any configuration
+
 ## Configuration Overview
 
 The following configuration is analyzed in this document:
