@@ -1,6 +1,7 @@
 # Unified Pose Trajectory Dataset
 # Combines functionality from OFDMouseDataset and BasePoseTrajDataset
 # Supports reconstruction with augmentation-aware training
+# MODIFIED: Added likelihood loading and processing
 
 import copy
 from pathlib import Path
@@ -24,6 +25,7 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
     - Centeralign transformation
     - Optional augmentations
     - Returns both augmented and raw features for reconstruction loss
+    - Likelihood loading and weighting (NEW)
     """
 
     def __init__(
@@ -44,7 +46,9 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
         augmentation_p: float = 0.5,
         grid_size: int = 500,
         fill_holes: bool = False,
-        return_augmented: bool = True,
+        data_augment: bool = False,
+        return_likelihoods: bool = False,  # NEW
+        likelihood_threshold: float = 0.8,  # NEW
         include_testdata: bool = False,
         **kwargs
     ):
@@ -66,7 +70,9 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
             augmentation_p: Probability for each augmentation
             grid_size: Arena size for augmentations
             fill_holes: Whether to interpolate missing keypoints
-            return_augmented: Return (aug_features, raw_features) instead of just features
+            data_augment: Return (aug_features, raw_features) instead of just features
+            return_likelihoods: Return likelihood weights for loss weighting (NEW)
+            likelihood_threshold: Threshold for likelihood filtering (NEW)
             include_testdata: Include test data in pretraining mode
         """
         self.mode = mode
@@ -78,6 +84,10 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
         self.scale_keypoints = scale_keypoints if scale else None
         self.grid_size = grid_size
         self.include_testdata = include_testdata
+        
+        # NEW: Likelihood parameters
+        self.return_likelihoods = return_likelihoods
+        self.likelihood_threshold = likelihood_threshold
         
         # Create mappings
         self.keypoint_name_to_idx = {name: i for i, name in enumerate(keypoint_names)}
@@ -95,10 +105,11 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
         self.sampling_rate = sampling_rate
         self.centeralign = centeralign
         self.fill_holes_enabled = fill_holes
-        self.return_augmented = return_augmented
+        self.data_augment = data_augment
         
         # Data storage (populated by load_data and preprocess)
         self.seq_keypoints = None  # List of arrays (variable lengths)
+        self.seq_confidences = None  # NEW: List of confidence arrays
         self.keypoints_ids = None
         self.sequence_scales = None
         self.items = None
@@ -145,6 +156,18 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
             Array of shape (n_frames, n_individuals, n_selected_keypoints, 2)
         """
         return keypoints[:, :, self.keypoint_indices, :]
+    
+    def _restrict_confidences(self, confidences: np.ndarray) -> np.ndarray:
+        """
+        Restrict confidences to selected subset.
+        
+        Args:
+            confidences: Array of shape (n_frames, n_individuals, n_all_keypoints)
+            
+        Returns:
+            Array of shape (n_frames, n_individuals, n_selected_keypoints)
+        """
+        return confidences[:, :, self.keypoint_indices]
 
     def compute_sequence_scale(self, keypoints: np.ndarray) -> float:
         """
@@ -210,140 +233,219 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
         align_start_idx = self.keypoint_name_to_idx[self.align_keypoints[0]]
         align_end_idx = self.keypoint_name_to_idx[self.align_keypoints[1]]
         
-        # Reshape: (seq_len, num_inds, num_kpts, 2) -> (seq_len * num_inds, num_kpts, 2)
-        data = data.reshape(-1, *data.shape[2:])
+        # data shape: (T, num_individuals, num_keypoints, 2)
+        # Extract center
+        center = data[:, 0, center_idx, :]  # (T, 2)
         
         # Center the data
-        center = data[:, center_idx, :]
-        centered_data = data - center[:, np.newaxis, :]
+        centered = data - center[:, np.newaxis, np.newaxis, :]  # (T, num_individuals, num_keypoints, 2)
         
-        # Compute rotation angle (align tail_base -> neck to y-axis)
-        rotation_angle = np.arctan2(
-            data[:, align_start_idx, 0] - data[:, align_end_idx, 0],
-            data[:, align_start_idx, 1] - data[:, align_end_idx, 1],
-        )
+        # Compute rotation from align_keypoints
+        align_vec = centered[:, 0, align_end_idx, :] - centered[:, 0, align_start_idx, :]  # (T, 2)
+        angles = np.arctan2(align_vec[:, 1], align_vec[:, 0])  # (T,)
         
-        # Create rotation matrix
-        R = np.array([
-            [np.cos(rotation_angle), -np.sin(rotation_angle)],
-            [np.sin(rotation_angle), np.cos(rotation_angle)],
-        ]).transpose((2, 0, 1))
-        
-        # Encode rotation as (sin, cos)
-        rotation = np.concatenate([
-            np.sin(rotation_angle)[:, np.newaxis],
-            np.cos(rotation_angle)[:, np.newaxis],
-        ], axis=-1)
+        # Create rotation matrices
+        cos_theta = np.cos(-angles)
+        sin_theta = np.sin(-angles)
+        R = np.array([[cos_theta, -sin_theta], [sin_theta, cos_theta]]).transpose(2, 0, 1)  # (T, 2, 2)
         
         # Apply rotation
-        centered_data = np.matmul(R, centered_data.transpose(0, 2, 1))
-        centered_data = centered_data.transpose((0, 2, 1))
+        rotated = np.matmul(R, centered.transpose(0, 1, 3, 2)).transpose(0, 1, 3, 2)  # (T, num_individuals, num_keypoints, 2)
         
         # Flatten keypoints
-        centered_data = centered_data.reshape((-1, self.num_keypoints * 2))
+        rotated_flat = rotated[:, 0].reshape(rotated.shape[0], -1)
         
-        return center, rotation, centered_data
+        # Encode rotation as (sin, cos)
+        rotation = np.stack([sin_theta, cos_theta], axis=1)  # (T, 2)
+        
+        return center, rotation, rotated_flat
 
-    def transform_to_centeralign_components(self, data: np.ndarray) -> np.ndarray:
-        """
-        Apply centeralign transformation.
-        
-        Args:
-            data: Shape (seq_len, num_inds, num_kpts, 2)
-            
-        Returns:
-            Features: Shape (seq_len, num_inds, 4 + num_kpts * 2)
-                     [center_x, center_y, sin, cos, ...rotated_keypoints...]
-        """
-        seq_len, num_inds = data.shape[:2]
-        
-        center, rotation, centered_data = self.transform_to_centered_data(data)
-        
-        # Concatenate: [center, rotation, rotated_keypoints]
-        features = np.concatenate([center, rotation, centered_data], axis=1)
-        features = features.reshape(seq_len, num_inds, -1)
-        
-        return features
-
-    def featurize_keypoints(self, keypoints: np.ndarray) -> torch.Tensor:
+    def featurize_keypoints(
+        self,
+        keypoints: np.ndarray
+    ) -> torch.Tensor:
         """
         Convert keypoints to features.
         
         Args:
-            keypoints: Shape (num_frames, num_features) or 
-                      (num_frames, num_inds, num_kpts, 2)
-        
-        Returns:
-            Features as torch.Tensor
-        """
-        if self.centeralign:
-            keypoints = keypoints.reshape(self.max_keypoints_len, *self.keyframe_shape)
-            keypoints = self.transform_to_centeralign_components(keypoints)
-        
-        keypoints = torch.tensor(keypoints, dtype=torch.float32)
-        return keypoints
-
-    def scale_subsequence(self, sequence: np.ndarray, seq_idx: int) -> np.ndarray:
-        """
-        Scale sequence by its pre-computed scale.
-        
-        Args:
-            sequence: Keypoints array (after featurization if centeralign)
-            seq_idx: Index of the source sequence
+            keypoints: (T, num_individuals * num_keypoints * 2)
             
         Returns:
-            Scaled sequence
+            features: (T, num_individuals, num_features)
+                If centeralign: (T, 1, 4 + num_keypoints * 2)
+                Else: (T, 1, num_keypoints * 2)
         """
-        if self.sequence_scales is not None and seq_idx < len(self.sequence_scales):
-            scale = self.sequence_scales[seq_idx]
-            if scale > 0:
-                sequence = sequence / scale
-        return sequence
-
-    def prepare_sample(
-        self,
-        sequence: np.ndarray,
-        seq_idx: int,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        """
-        Prepare a training sample with optional augmentations.
+        if not self.centeralign:
+            # Just reshape
+            features = keypoints.reshape(
+                self.max_keypoints_len, 
+                self.num_individuals, 
+                self.num_keypoints * 2
+            )
+            return torch.from_numpy(features).float()
         
-        Strategy for augmentation-aware reconstruction:
-        1. raw_features = featurize(raw_keypoints) 
-        2. aug_features = featurize(augment(raw_keypoints))
-        3. Model sees aug_features (with masking)
-        4. Loss computed against raw_features
+        # Reshape to proper keypoint format for centeralign
+        keypoints_reshaped = keypoints.reshape(
+            self.max_keypoints_len,
+            self.num_individuals,
+            self.num_keypoints,
+            2
+        )
+        
+        # Apply centeralign transformation
+        center, rotation, centered_kpts = self.transform_to_centered_data(keypoints_reshaped)
+        
+        # Concatenate: [center_x, center_y, sin, cos, ...centered_keypoints...]
+        features = np.concatenate([center, rotation, centered_kpts], axis=1)  # (T, 4 + num_keypoints * 2)
+        
+        # Add individuals dimension
+        features = features[:, np.newaxis, :]  # (T, 1, 4 + num_keypoints * 2)
+        
+        return torch.from_numpy(features).float()
+
+    def process_likelihoods(
+        self,
+        confidences: np.ndarray,
+        seq_idx: int
+    ) -> torch.Tensor:
+        """
+        Process confidences into likelihood weights.
         
         Args:
-            sequence: Keypoints array (num_frames, num_features)
+            confidences: (T, num_individuals, num_keypoints)
             seq_idx: Sequence index for scaling
             
         Returns:
-            If return_augmented: (aug_features, raw_features)
-            Else: features
+            weights: (T, num_individuals, num_features)
+                If centeralign: (T, 1, 4 + num_keypoints * 2)
+                     - First 2 values: center_keypoint confidence duplicated (for center x,y)
+                     - Next 2 values: 1.0, 1.0 (for rotation sin, cos)
+                     - Remaining values: individual keypoint confidences duplicated for x,y
+                Else: (T, 1, num_keypoints * 2)
+                     - Duplicate each keypoint likelihood for x,y
         """
-        # Reshape to keyframe format
-        sequence_reshaped = sequence.reshape(self.max_keypoints_len, *self.keyframe_shape)
+        # confidences shape: (T, 1, num_keypoints)
+        T = confidences.shape[0]
         
-        # Handle augmentations
-        if self.augmentations is not None and self.return_augmented:
-            # Create augmented version
-            sequence_aug = self.augmentations(sequence_reshaped.copy())
+        # Apply corruption: if any likelihood ≤ 0 in a frame, set all to 0
+        frame_corrupted = np.any(confidences <= 0, axis=(1, 2))  # (T,)
+        confidences[frame_corrupted] = 0.0
+        
+        # Apply threshold: keep if >= threshold, else 0
+        confidences = np.where(
+            confidences >= self.likelihood_threshold,
+            confidences,
+            0.0
+        )
+        
+        if self.centeralign:
+            # Create weights for centeralign features
+            # Shape: (T, 1, 4 + num_keypoints * 2)
             
-            # Featurize both versions
+            # Get center keypoint confidence
+            center_idx = self.keypoint_name_to_idx[self.center_keypoint]
+            center_conf = confidences[:, :, center_idx:center_idx+1]  # (T, 1, 1)
+            center_weights = np.repeat(center_conf, 2, axis=2)  # (T, 1, 2) for x,y
+            
+            # Rotation dims get likelihood = 1.0
+            rotation_weights = np.ones((T, 1, 2), dtype=np.float32)
+            
+            # Duplicate each keypoint likelihood for x,y
+            # confidences: (T, 1, num_keypoints) -> (T, 1, num_keypoints * 2)
+            kpt_weights = np.repeat(confidences, 2, axis=2)
+            
+            # Concatenate: [center_x, center_y, sin, cos, kpt0_x, kpt0_y, ...]
+            weights = np.concatenate([center_weights, rotation_weights, kpt_weights], axis=2)
+            
+        else:
+            # No centeralign: just duplicate for x,y
+            weights = np.repeat(confidences, 2, axis=2)
+        
+        return torch.from_numpy(weights).float()
+
+    def scale_subsequence(self, subsequence: np.ndarray, seq_idx: int) -> np.ndarray:
+        """
+        Scale a subsequence using pre-computed sequence scale.
+        
+        Args:
+            subsequence: Features to scale, shape (..., num_features)
+            seq_idx: Index of the sequence
+            
+        Returns:
+            Scaled features
+        """
+        if self.sequence_scales is None or seq_idx >= len(self.sequence_scales):
+            return subsequence
+        
+        scale = self.sequence_scales[seq_idx]
+        if scale > 0:
+            return subsequence / scale
+        return subsequence
+
+    def prepare_sample(
+        self,
+        subsequence: np.ndarray,
+        seq_idx: int
+    ):
+        """
+        Prepare a sample for training.
+        
+        Args:
+            subsequence: (max_keypoints_len, num_features)
+                If with confidences: tuple of (keypoints, confidences)
+            seq_idx: Sequence index
+            
+        Returns:
+            Single concatenated tensor:
+            - If augment + likelihoods: [raw, aug, confidences] shape (T, 1, 3*num_features)
+            - If augment only: [raw, aug] shape (T, 1, 2*num_features)
+            - If likelihoods only: [features, confidences] shape (T, 1, 2*num_features)
+            - Otherwise: features shape (T, 1, num_features)
+        """
+        # Check if subsequence is a tuple (keypoints, confidences)
+        if isinstance(subsequence, tuple):
+            keypoints_subseq, confidences_subseq = subsequence
+        else:
+            keypoints_subseq = subsequence
+            confidences_subseq = None
+        
+        # Reshape
+        sequence_reshaped = keypoints_subseq.reshape(
+            self.max_keypoints_len,
+            self.num_individuals,
+            self.num_keypoints,
+            2
+        )
+        
+        # Process likelihoods if available
+        likelihoods = None
+        if self.return_likelihoods and confidences_subseq is not None:
+            confidences_reshaped = confidences_subseq.reshape(
+                self.max_keypoints_len,
+                self.num_individuals,
+                self.num_keypoints
+            )
+            likelihoods = self.process_likelihoods(confidences_reshaped, seq_idx)
+        
+        # Handle augmentation
+        if self.augmentations is not None and self.data_augment:
+            # Create augmented version
+            aug_sequence = self.augmentations(sequence_reshaped.copy())
+            
+            # Featurize both
             raw_features = self.featurize_keypoints(
                 sequence_reshaped.reshape(self.max_keypoints_len, -1)
             )
             aug_features = self.featurize_keypoints(
-                sequence_aug.reshape(self.max_keypoints_len, -1)
+                aug_sequence.reshape(self.max_keypoints_len, -1)
             )
             
-            # Apply per-sequence scaling
+            # Apply scaling
             raw_features_np = raw_features.numpy()
             aug_features_np = aug_features.numpy()
             
             if self.centeralign:
-                # Scale only rotated keypoint part (skip center and rotation: first 4 features)
+                # Only scale the keypoint part (skip center + rotation)
                 raw_features_np[:, :, 4:] = self.scale_subsequence(
                     raw_features_np[:, :, 4:].reshape(-1, self.num_keypoints * 2),
                     seq_idx
@@ -368,7 +470,10 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
             raw_features = torch.tensor(raw_features_np, dtype=torch.float32)
             aug_features = torch.tensor(aug_features_np, dtype=torch.float32)
             
-            return aug_features, raw_features
+            # Concatenate: [raw, aug, (optionally) likelihoods]
+            if self.return_likelihoods and likelihoods is not None:
+                return torch.cat([raw_features, aug_features, likelihoods], dim=-1)
+            return torch.cat([raw_features, aug_features], dim=-1)
         
         else:
             # No augmentation or not returning both
@@ -392,6 +497,9 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
             
             features = torch.tensor(features_np, dtype=torch.float32)
             
+            # Concatenate: [features, (optionally) likelihoods]
+            if self.return_likelihoods and likelihoods is not None:
+                return torch.cat([features, likelihoods], dim=-1)
             return features
 
     def preprocess(self):
@@ -400,10 +508,12 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
         - Computes per-sequence scales
         - Handles variable-length sequences
         - Creates sliding window samples
+        - Stores confidences if return_likelihoods is True
         """
         sequences = self.raw_data["sequences"]
         
         seq_keypoints = []
+        seq_confidences = [] if self.return_likelihoods else None
         keypoints_ids = []
         sequence_scales = []
         
@@ -415,6 +525,13 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
             vec_seq = sequence["keypoints"]
             vec_seq = self._restrict_keypoints(vec_seq)
             
+            # Get confidences if needed
+            conf_seq = None
+            if self.return_likelihoods:
+                conf_seq = sequence.get("confidences", None)
+                if conf_seq is not None:
+                    conf_seq = self._restrict_confidences(conf_seq)
+            
             # Compute per-sequence scale
             scale = self.compute_sequence_scale(vec_seq)
             sequence_scales.append(scale)
@@ -422,13 +539,20 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
             # Fill holes if requested
             if self.fill_holes_enabled:
                 vec_seq = self.fill_holes(vec_seq)
+                # Note: We don't fill holes in confidences
             
             # Flatten keypoints
             vec_seq = vec_seq.reshape(vec_seq.shape[0], -1)
             
+            # Flatten confidences
+            if conf_seq is not None:
+                conf_seq = conf_seq.reshape(conf_seq.shape[0], -1)
+            
             # Temporal downsampling
             if self.sampling_rate > 1:
                 vec_seq = vec_seq[:: self.sampling_rate]
+                if conf_seq is not None:
+                    conf_seq = conf_seq[:: self.sampling_rate]
             
             # Pad sequence edges
             pad_length = min(sub_seq_length, 120)
@@ -438,8 +562,18 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
                 mode="edge",
             )
             
+            # Pad confidences
+            if conf_seq is not None:
+                pad_conf = np.pad(
+                    conf_seq,
+                    ((pad_length // 2, pad_length - 1 - pad_length // 2), (0, 0)),
+                    mode="edge",
+                )
+            
             # Store (as individual array to handle variable lengths)
             seq_keypoints.append(pad_vec.astype(np.float32))
+            if conf_seq is not None:
+                seq_confidences.append(pad_conf.astype(np.float32))
             
             # Create sliding window sample indices
             keypoints_ids.extend([
@@ -451,6 +585,7 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
         
         # Store results
         self.seq_keypoints = seq_keypoints  # List of arrays
+        self.seq_confidences = seq_confidences  # List of confidence arrays (or None)
         self.sequence_scales = np.array(sequence_scales, dtype=np.float32)
         self.keypoints_ids = keypoints_ids
         self.items = list(np.arange(len(keypoints_ids)))
@@ -467,21 +602,36 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
         Get a sample.
         
         Returns:
-            If return_augmented: ((aug_features, raw_features), [])
-            Else: (features, [])
+            (concatenated_tensor, []) where concatenated_tensor is:
+            - If augment + likelihoods: [raw, aug, confidences] (T, 1, 3*num_features)
+            - If augment only: [raw, aug] (T, 1, 2*num_features)
+            - If likelihoods only: [features, confidences] (T, 1, 2*num_features)
+            - Otherwise: features (T, 1, num_features)
         """
         subseq_ix = self.keypoints_ids[idx]
         seq_idx = subseq_ix[0]
         start_idx = subseq_ix[1]
         
         # Get subsequence
-        subsequence = self.seq_keypoints[seq_idx][
+        keypoints_subseq = self.seq_keypoints[seq_idx][
             start_idx : start_idx + self.max_keypoints_len
         ]
         
-        # Prepare sample
-        result = self.prepare_sample(subsequence, seq_idx=seq_idx)
+        # Get confidence subsequence if available
+        confidences_subseq = None
+        if self.seq_confidences is not None:
+            confidences_subseq = self.seq_confidences[seq_idx][
+                start_idx : start_idx + self.max_keypoints_len
+            ]
         
+        # Prepare sample (with or without confidences) - returns single concatenated tensor
+        if confidences_subseq is not None:
+            result = self.prepare_sample((keypoints_subseq, confidences_subseq), seq_idx=seq_idx)
+        else:
+            result = self.prepare_sample(keypoints_subseq, seq_idx=seq_idx)
+        if idx == 0:
+            print("DATASET __getitem__ result shape:", result.shape)
+
         return result, []
 
     # =========================================================================
@@ -558,5 +708,3 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
         original_kpts = original_kpts.reshape(final_shape)
         
         return original_kpts
-
-

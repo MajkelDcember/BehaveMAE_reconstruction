@@ -77,7 +77,9 @@ class HBehaveMAEModelSettings():
             'clip_grad': 0.02,
             'checkpoint_period': 20,
             'fill_holes': True,
-            'data_augment': False,
+            'data_augment': True,
+            'return_likelihoods': True,
+            'augmentations': True,
             'norm_loss': False,
             'seed': 0,
             'non_hierarchical': False,
@@ -152,7 +154,9 @@ class HBehaveMAEModelTraining():
             
             # Data augmentation
             fill_holes=settings_dict.get('fill_holes', True),
-            data_augment=settings_dict.get('data_augment', True),
+            data_augment=settings_dict.get('data_augment', False),
+            return_likelihoods=settings_dict.get('return_likelihoods', False),
+            augmentations=settings_dict.get('augmentations', None),
             centeralign=settings_dict.get('centeralign', False),
             include_test_data=settings_dict.get('include_test_data', False),
             norm_loss=settings_dict.get('norm_loss', True),

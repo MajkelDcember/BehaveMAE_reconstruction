@@ -24,6 +24,7 @@ from functools import partial, reduce
 from operator import floordiv, mul
 from typing import Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -61,8 +62,28 @@ class HBehaveMAE(GeneralizedHiera):
         decoding_strategy: str = "multi",
         norm_layer: nn.Module = partial(nn.LayerNorm, eps=1e-6),
         norm_loss: bool = False,
+        data_augment: bool = False,
+        return_likelihoods: bool = False,
         **kwdargs,
     ):
+        
+
+
+
+        self.data_augment = data_augment
+        self.return_likelihoods = return_likelihoods
+        
+        # Store original feature dimension - this is what goes through the model
+        original_input_size = kwdargs.get('input_size', (900, 1, 58))
+        self.feature_dim = original_input_size[-1]  # e.g., 58
+
+
+
+
+
+
+
+
         super().__init__(
             in_chans=in_chans,
             patch_stride=patch_stride,
@@ -298,7 +319,7 @@ class HBehaveMAE(GeneralizedHiera):
         return x, mask
 
     def forward_loss(
-        self, x: torch.Tensor, pred: torch.Tensor, mask: torch.Tensor
+        self, x: torch.Tensor, pred: torch.Tensor, mask: torch.Tensor, weights_vid: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Note: in mask, 0 is *visible*, 1 is *masked*
@@ -317,7 +338,46 @@ class HBehaveMAE(GeneralizedHiera):
         # MSE loss
         loss = (pred - label) ** 2
 
-        return loss.mean(), pred, label, None
+        # NEW: Apply likelihood weighting if provided
+        if weights_vid is not None:
+            # weights_vid shape: (B, 1, T, 1, num_features)
+            # We need to match it to the label/pred shape
+            
+            # First, downsample weights to match the strided reconstruction
+            # We use time strided loss, only take the first frame from each token
+            weights_strided = weights_vid[:, :, :: self.patch_stride[0], :, :]
+            
+            # Reshape to match label extraction
+            B, C, T, H, W = weights_strided.shape
+            t_num_blocks, h_num_blocks, w_num_blocks = self.tokens_spatial_shape_final
+            
+            # Partition into patches (similar to patch_pixel_label_3d but for weights)
+            weights_patches = self.patch_pixel_label_3d(
+                weights_strided, 
+                T // t_num_blocks, 
+                H // h_num_blocks, 
+                W // w_num_blocks
+            )
+            weights_patches = weights_patches.reshape(mask.shape[0], mask.shape[1], -1)
+            
+            # Extract weights for masked positions
+            weights_masked = weights_patches[mask]
+            
+            # Apply weights to loss
+            loss = loss * weights_masked
+            
+            # Compute mean, accounting for zero weights
+            # Only average over non-zero weighted elements
+            num_nonzero = (weights_masked > 0).sum().float()
+            if num_nonzero > 0:
+                loss = loss.sum() / num_nonzero
+            else:
+                loss = loss.mean()  # Fallback if all weights are zero
+        else:
+            loss = loss.mean()
+
+        return loss, pred, label, None
+    
 
     def forward(
         self,
@@ -326,16 +386,62 @@ class HBehaveMAE(GeneralizedHiera):
         mask_ratio: float = 0.6,
         mask_strategy: str = "random",
         mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ):
+        """
+        x shape:
+            - features only:                (B, T, I, F)
+            - raw + aug:                    (B, T, I, 2F)
+            - features + conf:              (B, T, I, 2F)
+            - raw + aug + conf:             (B, T, I, 3F)
+        """
 
-        # add channel dimension
-        x = x.unsqueeze(1)
+        F = self.feature_dim
 
-        latent, mask = self.forward_encoder(x, mask_ratio, mask=mask)
+        # ------------------------------------------------------------
+        # Slice inputs (views only, no copies)
+        # ------------------------------------------------------------
+        if self.data_augment and self.return_likelihoods:
+            x_raw      = x[..., 0:F]
+            x_features = x[..., F:2*F]
+            x_conf     = x[..., 2*F:3*F]
 
-        pred, pred_mask = self.forward_decoder(
-            latent, mask
-        )  # pred_mask is mask at resolution of *prediction*
+        elif self.data_augment:
+            x_raw      = x[..., 0:F]
+            x_features = x[..., F:2*F]
+            x_conf     = None
 
-        # Toggle mask, to generate labels for *masked* tokens
-        return *self.forward_loss(x, pred, ~pred_mask), mask
+        elif self.return_likelihoods:
+            x_features = x[..., 0:F]
+            x_raw      = x_features            # alias, no copy
+            x_conf     = x[..., F:2*F]
+
+        else:
+            x_features = x
+            x_raw      = x_features            # alias, no copy
+            x_conf     = None
+
+        # ------------------------------------------------------------
+        # Forward pass (only augmented / features go through model)
+        # ------------------------------------------------------------
+        x_features = x_features.unsqueeze(1)  # (B, 1, T, I, F)
+
+        latent, mask = self.forward_encoder(x_features, mask_ratio, mask=mask)
+        pred, pred_mask = self.forward_decoder(latent, mask)
+
+        # ------------------------------------------------------------
+        # Loss computation
+        # ------------------------------------------------------------
+        x_raw_for_loss = x_raw.unsqueeze(1)  # (B, 1, T, I, F)
+
+        weights_vid_for_loss = (
+            x_conf.unsqueeze(1) if x_conf is not None else None
+        )
+
+        loss, pred_flat, label_flat, extra = self.forward_loss(
+            x_raw_for_loss,
+            pred,
+            ~pred_mask,
+            weights_vid=weights_vid_for_loss,
+        )
+
+        return loss, pred_flat, label_flat, extra, mask

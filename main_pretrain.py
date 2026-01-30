@@ -66,6 +66,9 @@ def get_args_parser():
     parser.add_argument("--sliding_window", default=1, type=int)
     parser.add_argument("--fill_holes", default=False, type=str2bool)
     parser.add_argument("--data_augment", default=False, type=str2bool)
+    parser.add_argument("--return_likelihoods", default=False, type=str2bool)
+    parser.add_argument("--augmentations", type=str2bool, default=False)
+
     parser.add_argument("--centeralign", action="store_true")
     parser.add_argument("--include_test_data", action="store_true")
 
@@ -350,8 +353,9 @@ def main(args):
             sampling_rate=args.sampling_rate,     # Added
             fill_holes=args.fill_holes, 
             centeralign=args.centeralign,
-            augmentations=args.data_augment,
-            return_augmented=False,
+            augmentations=args.augmentations,
+            data_augment=args.data_augment,
+            return_likelihoods=args.return_likelihoods,
         )
 
         dataset_test = PoseReconstructionDataset(
@@ -367,8 +371,9 @@ def main(args):
             sampling_rate=args.sampling_rate,     # Added
             fill_holes=args.fill_holes, 
             centeralign=args.centeralign,
-            augmentations=False,
-            return_augmented=False,
+            augmentations=None,
+            data_augment=False,
+            return_likelihoods=False,
         )
 
     else:
