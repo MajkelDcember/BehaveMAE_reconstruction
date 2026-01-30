@@ -37,6 +37,7 @@ from models import models_defs
 from util import misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 from util.misc import parse_tuples, str2bool
+from datasets.reconstruct_data import PoseReconstructionDataset
 
 
 def get_args_parser():
@@ -59,7 +60,7 @@ def get_args_parser():
         "--dataset",
         default="shot7m2",
         type=str,
-        help="Type of dataset [shot7m2, mabe_mice, hbabel]",
+        help="Type of dataset [shot7m2, mabe_mice, hbabel, OFD_mouse]",
     )
 
     parser.add_argument("--sliding_window", default=1, type=int)
@@ -158,6 +159,13 @@ def get_args_parser():
         default="",
         help="path where to load data from",
     )
+    parser.add_argument(
+        "--test_data_path",
+        default="",
+        type=str,
+        help="Path to test .npy file (for reconstruction datasets)",
+    )
+
     parser.add_argument(
         "--output_dir",
         default="./output_dir",
@@ -309,6 +317,52 @@ def main(args):
             augmentations=None,
             centeralign=args.centeralign,
         )
+    elif args.dataset in ["ReconstructionDataset", "OFD_mouse"]:
+
+        # ------------------------------------------------------------------
+        # OFD / Pose Reconstruction dataset
+        # args.path_to_data_dir MUST point to a .npy file
+        # Train and test are handled by passing different files
+        # ------------------------------------------------------------------
+
+        ALL_KEYPOINTS = [
+            "nose", "left_ear", "right_ear", "left_ear_tip", "right_ear_tip",
+            "left_eye", "right_eye", "neck", "mid_back", "mouse_center",
+            "mid_backend", "mid_backend2", "mid_backend3", "tail_base",
+            "tail1", "tail2", "tail3", "tail4", "tail5",
+            "left_shoulder", "left_midside", "left_hip",
+            "right_shoulder", "right_midside", "right_hip",
+            "tail_end", "head_midpoint",
+        ]
+
+        USED_KEYPOINTS = ALL_KEYPOINTS
+
+        dataset_train = PoseReconstructionDataset(
+            mode="pretrain",
+            data_path=args.path_to_data_dir,     # <-- TRAIN .npy
+            keypoint_names=USED_KEYPOINTS,
+            all_keypoints=ALL_KEYPOINTS,
+            center_keypoint="neck",
+            align_keypoints=("tail_base", "neck"),
+            scale_keypoints=("nose", "tail_base"),
+            centeralign=args.centeralign,
+            augmentations=args.data_augment,
+            return_augmented=True,
+        )
+
+        dataset_test = PoseReconstructionDataset(
+            mode="test",
+            data_path=args.test_data_path,       # <-- TEST .npy (NEW ARG)
+            keypoint_names=USED_KEYPOINTS,
+            all_keypoints=ALL_KEYPOINTS,
+            center_keypoint="neck",
+            align_keypoints=("tail_base", "neck"),
+            scale_keypoints=("nose", "tail_base"),
+            centeralign=args.centeralign,
+            augmentations=False,
+            return_augmented=False,
+        )
+
     else:
         print(f"Dataset {args.dataset} unknown...")
 
