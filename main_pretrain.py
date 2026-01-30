@@ -345,9 +345,13 @@ def main(args):
             center_keypoint="neck",
             align_keypoints=("tail_base", "neck"),
             scale_keypoints=("nose", "tail_base"),
+            num_frames=args.num_frames,           # Added missing params
+            sliding_window=args.sliding_window,   # Added
+            sampling_rate=args.sampling_rate,     # Added
+            fill_holes=args.fill_holes, 
             centeralign=args.centeralign,
             augmentations=args.data_augment,
-            return_augmented=True,
+            return_augmented=False,
         )
 
         dataset_test = PoseReconstructionDataset(
@@ -358,6 +362,10 @@ def main(args):
             center_keypoint="neck",
             align_keypoints=("tail_base", "neck"),
             scale_keypoints=("nose", "tail_base"),
+            num_frames=args.num_frames,           # Added missing params
+            sliding_window=args.sliding_window,   # Added
+            sampling_rate=args.sampling_rate,     # Added
+            fill_holes=args.fill_holes, 
             centeralign=args.centeralign,
             augmentations=False,
             return_augmented=False,

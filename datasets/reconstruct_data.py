@@ -172,31 +172,26 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
         return scale if scale > 0 else 1.0
 
     @staticmethod
-    def fill_holes(data: np.ndarray) -> np.ndarray:
-        """Interpolate missing keypoints (zeros)."""
-        clean_data = copy.deepcopy(data)
-        num_individuals = clean_data.shape[1]
-        
-        # Fill holes in first frame
-        for m in range(num_individuals):
-            holes = np.where(clean_data[0, m, :, 0] == 0)
-            if not holes:
-                continue
-            for h in holes[0]:
-                sub = np.where(clean_data[:, m, h, 0] != 0)
-                if sub and sub[0].size > 0:
-                    clean_data[0, m, h, :] = clean_data[sub[0][0], m, h, :]
-
-        # Fill holes in remaining frames
-        for fr in range(1, clean_data.shape[0]):
-            for m in range(num_individuals):
-                holes = np.where(clean_data[fr, m, :, 0] == 0)
-                if not holes:
-                    continue
-                for h in holes[0]:
-                    clean_data[fr, m, h, :] = clean_data[fr - 1, m, h, :]
-        
-        return clean_data
+    def fill_holes(vec_seq):
+            if np.any(np.isnan(vec_seq)):
+                # Simple forward fill for NaN values
+                for ind in range(vec_seq.shape[1]):
+                    for kpt in range(vec_seq.shape[2]):
+                        for dim in range(vec_seq.shape[3]):
+                            mask = np.isnan(vec_seq[:, ind, kpt, dim])
+                            if np.any(mask):
+                                # Forward fill
+                                idx = np.where(~mask)[0]
+                                if len(idx) > 0:
+                                    vec_seq[:, ind, kpt, dim] = np.interp(
+                                        np.arange(len(vec_seq)),
+                                        idx,
+                                        vec_seq[idx, ind, kpt, dim]
+                                    )
+                                else:
+                                    # All NaN, use zeros
+                                    vec_seq[:, ind, kpt, dim] = 0
+            return vec_seq
 
     def transform_to_centered_data(
         self,

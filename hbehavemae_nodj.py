@@ -53,11 +53,11 @@ class HBehaveMAEModelSettings():
         return {
             'batch_size': 768,
             'model_name': 'hbehavemae',
-            'input_size': (900, 1, 20),  # OFD: 1 individual, 20 features after centeralign
+            'input_size': (900, 1, 58),  # OFD: 1 individual, 20 features after centeralign
             'stages': (3, 4, 5),
             'q_strides': [(5, 1, 1), (1, 1, 1)],  # Don't stride in individuals dim (it's only 1)
             'mask_unit_attn': [True, False, False],
-            'patch_kernel': (3, 1, 20),  # Match last dimension to input_size
+            'patch_kernel': (3, 1, 58),  # Match last dimension to input_size
             'init_embed_dim': 128,
             'init_num_heads': 2,
             'out_embed_dims': (128, 192, 256),
@@ -76,9 +76,9 @@ class HBehaveMAEModelSettings():
             'mask_ratio': 0.875,
             'clip_grad': 0.02,
             'checkpoint_period': 20,
-            'fill_holes': False,
+            'fill_holes': True,
             'data_augment': False,
-            'norm_loss': True,
+            'norm_loss': False,
             'seed': 0,
             'non_hierarchical': False,
             'weight_decay': 0.05,
