@@ -223,6 +223,22 @@ class HBehaveMAE(GeneralizedHiera):
     def get_label_3d(self, input_vid: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         # mask (boolean tensor): True must correspond to *masked*
 
+
+        # # --- [DEBUG 2: LABEL STRIDING] ---
+        # T_orig = input_vid.shape[2]
+        # strided_input = input_vid[:, :, :: self.patch_stride[0], :, :]
+        # T_strided = strided_input.shape[2]
+
+        # print(f"\n[GET_LABEL_3D DEBUG]")
+        # print(f"  > Input Vid T: {T_orig}")
+        # print(f"  > Patch Stride (Time): {self.patch_stride[0]}")
+        # print(f"  > Resulting Label T: {T_strided}")
+        # if T_strided < T_orig:
+        #     print(f"  > WARNING: Losing {T_orig - T_strided} frames in loss calculation!")
+        # # --------------------------------
+
+
+
         # We use time strided loss, only take the first frame from each token
         input_vid = input_vid[:, :, :: self.patch_stride[0], :, :]
 
@@ -362,6 +378,16 @@ class HBehaveMAE(GeneralizedHiera):
             
             # Extract weights for masked positions
             weights_masked = weights_patches[mask]
+
+            # # --- [DEBUG 3: LOSS COMPONENT ALIGNMENT] ---
+            # print(f"\n[FORWARD_LOSS DEBUG]")
+            # print(f"  > Prediction shape (pred[mask]): {pred.shape}")
+            # print(f"  > Label shape (label): {label.shape}")
+            # if weights_vid is not None:
+            #     print(f"  > Weights Masked shape: {weights_masked.shape}")
+            #     # Verify the values: are they mostly 1s and 0s?
+            #     print(f"  > Avg confidence in this batch: {weights_masked.mean().item():.4f}")
+            # # ------------------------------------------
             
             # Apply weights to loss
             loss = loss * weights_masked
@@ -419,6 +445,19 @@ class HBehaveMAE(GeneralizedHiera):
             x_features = x
             x_raw      = x_features            # alias, no copy
             x_conf     = None
+
+
+            
+        # # --- [DEBUG 1: MODEL SLICING] ---
+        # print(f"\n[MODEL INPUT DEBUG]")
+        # print(f"  > Full x shape: {x.shape}")
+        # print(f"  > x_raw shape (target): {x_raw.shape}")
+        # print(f"  > x_features shape (input): {x_features.shape}")
+        # if x_conf is not None:
+        #     print(f"  > x_conf shape (weights): {x_conf.shape}")
+        # # -------------------------------
+
+
 
         # ------------------------------------------------------------
         # Forward pass (only augmented / features go through model)

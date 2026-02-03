@@ -371,9 +371,9 @@ def main(args):
             sampling_rate=args.sampling_rate,     # Added
             fill_holes=args.fill_holes, 
             centeralign=args.centeralign,
-            augmentations=None,
-            data_augment=False,
-            return_likelihoods=False,
+            augmentations=args.augmentations,
+            data_augment=args.data_augment,
+            return_likelihoods=args.return_likelihoods,
         )
 
     else:
