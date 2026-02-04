@@ -26,6 +26,7 @@ import time
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
+import wandb
 from iopath.common.file_io import g_pathmgr as pathmgr
 from torch.utils.tensorboard import SummaryWriter
 
@@ -234,6 +235,13 @@ def get_args_parser():
         type=float,
         nargs="+",
     )
+    
+    # W&B arguments
+    parser.add_argument("--use_wandb", action="store_true", help="Use Weights & Biases for logging")
+    parser.add_argument("--wandb_project", default="hbehavemae", type=str, help="W&B project name")
+    parser.add_argument("--wandb_entity", default="majkel_d_cember", type=str, help="W&B entity name")
+    parser.add_argument("--wandb_run_name", default=f"run-{datetime.now().strftime('%Y%m%d_%H%M%S')}", type=str, help="W&B run name")
+    
     return parser
 
 
@@ -405,6 +413,15 @@ def main(args):
         log_writer = SummaryWriter(log_dir=args.log_dir)
     else:
         log_writer = None
+    
+    # Initialize W&B
+    if global_rank == 0 and args.use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_run_name,
+            config=vars(args),
+        )
 
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train,
@@ -517,6 +534,8 @@ def main(args):
         if args.output_dir and misc.is_main_process():
             if log_writer is not None:
                 log_writer.flush()
+            if args.use_wandb:
+                wandb.log(log_stats)
             with pathmgr.open(
                 f"{args.output_dir}/log.txt",
                 "a",

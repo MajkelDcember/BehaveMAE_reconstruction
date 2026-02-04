@@ -21,6 +21,7 @@ import math
 from typing import Iterable
 
 import torch
+import wandb
 from iopath.common.file_io import g_pathmgr as pathmgr
 
 import util.lr_sched as lr_sched
@@ -136,6 +137,13 @@ def train_one_epoch(
             epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
             log_writer.add_scalar("train_loss", loss_value_reduce, epoch_1000x)
             log_writer.add_scalar("lr", lr, epoch_1000x)
+        
+        # Log all metrics to W&B
+        if args.use_wandb and (data_iter_step + 1) % accum_iter == 0:
+            log_dict = {
+                f"train_{k}": meter.value for k, meter in metric_logger.meters.items()
+            }
+            wandb.log(log_dict)
 
     if data_loader_val:
         # compute loss on test data
@@ -172,6 +180,10 @@ def train_one_epoch(
                         (data_iter_step / len(data_loader) + epoch) * 1000
                     )
                     log_writer.add_scalar("test_loss", loss_value_reduce, epoch_1000x)
+                
+                # Log validation loss to W&B
+                if args.use_wandb and (data_iter_step + 1) % accum_iter == 0:
+                    wandb.log({"val_loss": loss_value_reduce})
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
