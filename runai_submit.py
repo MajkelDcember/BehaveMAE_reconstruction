@@ -7,12 +7,12 @@ num_gpus = 2
 run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 project_root = "/scratch/michal/projects/dvc_ofd_2025/code/BehaveMAE_reconstruction"
 data_root = "/scratch/michal/projects/dvc_ofd_2025/data/interim/hbmae_training_data"
-
+run_name = f"ofd_hbmae_{run_id}"
 train_args = [
     "--dataset", "OFD_mouse",
     "--path_to_data_dir", f"{data_root}/hbmaeproject-0_shuffle-1/hbmaeproj-0_shuffle-1_train.npy",
     "--test_data_path", f"{data_root}/hbmaeproject-0_shuffle-1/hbmaeproj-0_shuffle-1_test.npy",
-    "--wandb_run_name", f"ofd_hbmae_{run_id}",
+    "--wandb_run_name", run_name,
     "--model", "hbehavemae",
     "--non_hierarchical", "True",
     "--input_size", "900", "1", "56",
@@ -67,7 +67,7 @@ else:
     training_cmd = f"cd {project_root} && OMP_NUM_THREADS=1 uv run python run_pretrain.py {' '.join(train_args)}"
 
 subprocess.run([
-    "runai", "submit", "hbmae-ofd",
+    "runai", "submit", f"hbmae-ofd_{run_id}",
     "--node-pool", "default",
     "--gpu", str(num_gpus),
     "--cpu", "10",
