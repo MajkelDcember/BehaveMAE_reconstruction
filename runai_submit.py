@@ -4,7 +4,7 @@ import subprocess
 from datetime import datetime
 
 num_gpus = 2
-run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
 project_root = "/scratch/michal/projects/dvc_ofd_2025/code/BehaveMAE_reconstruction"
 data_root = "/scratch/michal/projects/dvc_ofd_2025/data/interim/hbmae_training_data"
 run_name = f"ofd_hbmae_{run_id}"
@@ -67,7 +67,7 @@ else:
     training_cmd = f"cd {project_root} && OMP_NUM_THREADS=1 uv run python run_pretrain.py {' '.join(train_args)}"
 
 subprocess.run([
-    "runai", "submit", f"hbmae-ofd_{run_id}",
+    "runai", "submit", f"hbmae-ofd-{run_id}",
     "--node-pool", "default",
     "--gpu", str(num_gpus),
     "--cpu", "10",
