@@ -116,8 +116,9 @@ def get_args_parser():
     parser.add_argument("--input_size", default=(600, 3, 24), nargs="+", type=int)
     parser.add_argument("--stages", default=(2, 3, 4), nargs="+", type=int)
     parser.add_argument(
-        "--q_strides", default=[(1, 1, 3), (1, 1, 4), (1, 3, 1)], type=parse_tuples
+        "--q_strides", default=[(5,1,1), (1, 1, 1)], type=parse_tuples
     )
+
     parser.add_argument(
         "--mask_unit_attn", default=[True, False, False], nargs="+", type=str2bool
     )
@@ -241,6 +242,10 @@ def get_args_parser():
     parser.add_argument("--wandb_project", default="hbehavemae", type=str, help="W&B project name")
     parser.add_argument("--wandb_entity", default="majkel_d_cember", type=str, help="W&B entity name")
     parser.add_argument("--wandb_run_name", default=None, type=str, help="W&B run name")
+    
+     
+    parser.add_argument("--nan_scattered_threshold", default=0.4, type=float)
+    parser.add_argument("--nan_concentrated_threshold", default=0.05, type=float)
     
     return parser
 
@@ -407,6 +412,9 @@ def main(args):
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
         if dataset_test:
             sampler_test = torch.utils.data.SequentialSampler(dataset_test)
+
+    # Set global_rank in args for downstream use (e.g., wandb logging)
+    args.global_rank = global_rank
 
     if global_rank == 0 and args.log_dir is not None:
         try:

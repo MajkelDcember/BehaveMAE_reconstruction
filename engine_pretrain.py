@@ -138,8 +138,12 @@ def train_one_epoch(
             log_writer.add_scalar("train_loss", loss_value_reduce, epoch_1000x)
             log_writer.add_scalar("lr", lr, epoch_1000x)
         
-        # Log all metrics to W&B
-        if args.use_wandb and (data_iter_step + 1) % accum_iter == 0:
+        # Log all metrics to W&B (only on main process)
+        if (
+            args.use_wandb
+            and (data_iter_step + 1) % accum_iter == 0
+            and (not hasattr(args, "global_rank") or args.global_rank == 0)
+        ):
             log_dict = {
                 f"train_{k}": meter.value for k, meter in metric_logger.meters.items()
             }
@@ -181,8 +185,12 @@ def train_one_epoch(
                     )
                     log_writer.add_scalar("test_loss", loss_value_reduce, epoch_1000x)
                 
-                # Log validation loss to W&B
-                if args.use_wandb and (data_iter_step + 1) % accum_iter == 0:
+                # Log validation loss to W&B (only on main process)
+                if (
+                    args.use_wandb
+                    and (data_iter_step + 1) % accum_iter == 0
+                    and (not hasattr(args, "global_rank") or args.global_rank == 0)
+                ):
                     wandb.log({"val_loss": loss_value_reduce})
 
     # gather the stats from all processes

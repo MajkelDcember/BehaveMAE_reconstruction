@@ -50,6 +50,8 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
         return_likelihoods: bool = False,  # NEW
         likelihood_threshold: float = 0.8,  # NEW
         include_testdata: bool = False,
+        nan_scattered_threshold: float = 0.4,
+        nan_concentrated_threshold: float = 0.05,
         **kwargs
     ):
         """
@@ -74,6 +76,8 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
             return_likelihoods: Return likelihood weights for loss weighting (NEW)
             likelihood_threshold: Threshold for likelihood filtering (NEW)
             include_testdata: Include test data in pretraining mode
+            nan_scattered_threshold: Max allowed scattered NaN percentage (default 40%)
+            nan_concentrated_threshold: Max allowed concentrated NaN percentage (default 5%)
         """
         self.mode = mode
         self.data_path = Path(data_path)
@@ -115,6 +119,7 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
         self.items = None
         self.n_frames = None
         self.raw_data = None
+        self.discarded_windows = 0  # Track discarded windows
         
         # Setup augmentations
         self.augmentations = None
@@ -126,6 +131,8 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
                 Reflect(grid_size=gs, p=augmentation_p),
             ])
         
+        self.nan_scattered_threshold = nan_scattered_threshold
+        self.nan_concentrated_threshold = nan_concentrated_threshold
         # Load and preprocess
         self.load_data()
         self.preprocess()
@@ -194,31 +201,256 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
         end_pts = keypoints[:, 0, end_idx, :]
         
         distances = np.linalg.norm(start_pts - end_pts, axis=1)
-        scale = np.median(distances)
+        # Ignore NaN distances when computing scale
+        valid_distances = distances[~np.isnan(distances)]
+        if len(valid_distances) == 0:
+            return 1.0
+        scale = np.median(valid_distances)
         
         return scale if scale > 0 else 1.0
+    
+
+
+    # =============================================================================
+    # CENTRALIZED RELIABILITY LOGIC - module-level function
+    # =============================================================================
+    @staticmethod
+    def zero_out_confidences(
+        keypoints: np.ndarray,        # (T, I, K, 2), raw, BEFORE fill_holes
+        confidences: np.ndarray,      # (T, I, K)
+        nose_idx: Optional[int] = None,      # index of nose keypoint (None to skip flip detection)
+        tail_base_idx: Optional[int] = None, # index of tail_base keypoint (None to skip flip detection)
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Single place where frame unreliability is decided.
+        Only zeros confidences, never restores them.
+        
+        Zeroes confidence for frames where:
+        1. Any keypoint coordinate is NaN
+        2. Nose-tail angle flips by > 90 degrees between frames (if indices provided)
+        3. Too many surrounding frames already have zero confidence (temporal domination)
+        """
+        FLIP_ANGLE_THRESHOLD = np.deg2rad(90.0)
+        DOMINATION_WINDOW_SIZE = 5
+        DOMINATION_THRESHOLD = 0.5
+        BAD_CONF_THRESHOLD = 0.01
+        
+        T = keypoints.shape[0]
+        K = keypoints.shape[2]
+        confidences = confidences.copy()
+        
+        # 1. NaN domination: zero confidence if ANY coordinate is NaN in frame
+        nan_per_frame = np.any(np.isnan(keypoints), axis=(1, 2, 3))
+        confidences[nan_per_frame] = 0.0
+        
+        # 2. Flip detection: sudden orientation reversal indicates tracking error
+        if (nose_idx is not None and tail_base_idx is not None and
+            0 <= nose_idx < K and 0 <= tail_base_idx < K):
+            
+            nose = keypoints[:, 0, nose_idx, :]
+            tail_base = keypoints[:, 0, tail_base_idx, :]
+            direction = nose - tail_base
+            
+            angles = np.arctan2(direction[:, 1], direction[:, 0])
+            
+            angle_diff = np.diff(angles)
+            angle_diff = np.arctan2(np.sin(angle_diff), np.cos(angle_diff))
+            
+            flip_detected = np.abs(angle_diff) > FLIP_ANGLE_THRESHOLD
+            
+            for i in np.where(flip_detected)[0]:
+                confidences[i] = 0.0
+                confidences[i + 1] = 0.0
+        
+        # 3. Temporal domination: expand zero regions monotonically
+        conf_flat = confidences.reshape(T, -1)
+        frame_is_bad = np.any(conf_flat <= BAD_CONF_THRESHOLD, axis=1)
+        
+        half_window = DOMINATION_WINDOW_SIZE // 2
+        changed = True
+        max_iterations = T
+        
+        for _ in range(max_iterations):
+            if not changed:
+                break
+            changed = False
+            
+            for t in range(T):
+                if frame_is_bad[t]:
+                    continue
+                
+                start = max(0, t - half_window)
+                end = min(T, t + half_window + 1)
+                window_bad = frame_is_bad[start:end]
+                bad_ratio = np.mean(window_bad)
+                
+                if bad_ratio > DOMINATION_THRESHOLD:
+                    frame_is_bad[t] = True
+                    confidences[t] = 0.0
+                    changed = True
+        
+        return keypoints, confidences
+    
+    def _find_max_contiguous_true(self, bool_array: np.ndarray) -> int:
+        """
+        Find the length of the longest contiguous True sequence.
+        
+        Args:
+            bool_array: 1D boolean array
+            
+        Returns:
+            Length of longest contiguous True sequence
+        """
+        if not np.any(bool_array):
+            return 0
+        
+        # Pad with False to handle edge cases
+        padded = np.concatenate([[False], bool_array, [False]])
+        diff = np.diff(padded.astype(int))
+        
+        starts = np.where(diff == 1)[0]
+        ends = np.where(diff == -1)[0]
+        
+        if len(starts) == 0:
+            return 0
+        
+        lengths = ends - starts
+        return int(np.max(lengths))
+
+    # def check_window_validity(self, window: np.ndarray) -> bool:
+    #     """
+    #     Check if a window should be kept based on NaN criteria.
+        
+    #     Discard if:
+    #     - More than nan_scattered_threshold (40%) scattered NaNs
+    #     - Concentrated NaNs (contiguous block) taking more than 
+    #       nan_concentrated_threshold (5%) of the window
+        
+    #     Args:
+    #         window: Array of shape (T, features) or (T, individuals, keypoints, 2)
+        
+    #     Returns:
+    #         True if window is valid, False if it should be discarded
+    #     """
+    #     window_len = window.shape[0]
+    #     window_flat = window.reshape(window_len, -1)
+        
+    #     # Check which frames have any NaN
+    #     nan_per_frame = np.any(np.isnan(window_flat), axis=1)
+    #     nan_frame_count = np.sum(nan_per_frame)
+        
+    #     if nan_frame_count == 0:
+    #         return True
+        
+    #     nan_percentage = nan_frame_count / window_len
+        
+    #     # Find max contiguous NaN frames (concentrated check)
+    #     max_contiguous = self._find_max_contiguous_true(nan_per_frame)
+    #     concentrated_percentage = max_contiguous / window_len
+        
+    #     # If concentrated (contiguous block > threshold) → discard
+    #     if concentrated_percentage > self.nan_concentrated_threshold:
+    #         return False
+        
+    #     # If scattered but > threshold → discard
+    #     if nan_percentage > self.nan_scattered_threshold:
+    #         return False
+        
+    #     return True
+    def check_window_validity(self, window: np.ndarray, confidences: np.ndarray = None) -> bool:
+        """
+        Check if a window should be kept based on low-likelihood criteria.
+        
+        Discard if:
+        - More than nan_scattered_threshold (40%) frames have any likelihood < 0
+        - Concentrated bad frames (contiguous block) taking more than 
+        nan_concentrated_threshold (5%) of the window
+        
+        Args:
+            window: Keypoints array of shape (T, features) - kept for backward compatibility
+            confidences: Confidence array of shape (T, features) where features = n_keypoints * n_individuals
+        
+        Returns:
+            True if window is valid, False if it should be discarded
+        """
+        if confidences is None:
+            # Fallback to NaN check if no confidences provided
+            window_len = window.shape[0]
+            window_flat = window.reshape(window_len, -1)
+            bad_per_frame = np.any(np.isnan(window_flat), axis=1)
+        else:
+            window_len = confidences.shape[0]
+            conf_flat = confidences.reshape(window_len, -1)
+            # Check which frames have any likelihood < 0
+            bad_per_frame = np.any(conf_flat <= 0.01, axis=1)
+        
+        bad_frame_count = np.sum(bad_per_frame)
+        
+        if bad_frame_count == 0:
+            return True
+        
+        bad_percentage = bad_frame_count / window_len
+        
+        # Find max contiguous bad frames (concentrated check)
+        max_contiguous = self._find_max_contiguous_true(bad_per_frame)
+        concentrated_percentage = max_contiguous / window_len
+        
+        # If concentrated (contiguous block > threshold) → discard
+        if concentrated_percentage > self.nan_concentrated_threshold:
+            return False
+        
+        # If scattered but > threshold → discard
+        if bad_percentage > self.nan_scattered_threshold:
+            return False
+        
+        return True
 
     @staticmethod
-    def fill_holes(vec_seq):
-            if np.any(np.isnan(vec_seq)):
-                # Simple forward fill for NaN values
-                for ind in range(vec_seq.shape[1]):
-                    for kpt in range(vec_seq.shape[2]):
-                        for dim in range(vec_seq.shape[3]):
-                            mask = np.isnan(vec_seq[:, ind, kpt, dim])
-                            if np.any(mask):
-                                # Forward fill
-                                idx = np.where(~mask)[0]
-                                if len(idx) > 0:
-                                    vec_seq[:, ind, kpt, dim] = np.interp(
-                                        np.arange(len(vec_seq)),
-                                        idx,
-                                        vec_seq[idx, ind, kpt, dim]
-                                    )
-                                else:
-                                    # All NaN, use zeros
-                                    vec_seq[:, ind, kpt, dim] = 0
+    def fill_holes(vec_seq: np.ndarray) -> np.ndarray:
+        """
+        Fill NaN values using linear interpolation.
+        
+        Args:
+            vec_seq: Array of shape (T, n_individuals, n_keypoints, 2)
+            
+        Returns:
+            Array with NaNs filled via linear interpolation
+        """
+        if not np.any(np.isnan(vec_seq)):
             return vec_seq
+        
+        result = vec_seq.copy()
+        T = result.shape[0]
+        x_indices = np.arange(T)
+        
+        for ind in range(result.shape[1]):
+            for kpt in range(result.shape[2]):
+                for dim in range(result.shape[3]):
+                    data = result[:, ind, kpt, dim]
+                    mask = np.isnan(data)
+                    
+                    if not np.any(mask):
+                        continue
+                    
+                    if np.all(mask):
+                        # All NaN, use zeros
+                        result[:, ind, kpt, dim] = 0
+                        continue
+                    
+                    # Get valid indices and values
+                    valid_mask = ~mask
+                    valid_indices = x_indices[valid_mask]
+                    valid_values = data[valid_mask]
+                    
+                    # Linear interpolation for all positions
+                    # np.interp handles extrapolation at boundaries by clamping
+                    result[:, ind, kpt, dim] = np.interp(
+                        x_indices,
+                        valid_indices,
+                        valid_values
+                    )
+        
+        return result
 
     def transform_to_centered_data(
         self,
@@ -305,6 +537,9 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
         centered_kpts = np.delete(centered_kpts, center_idx, axis=1)
         centered_kpts = centered_kpts.reshape(self.max_keypoints_len, -1)
 
+        arena_half = self.grid_size / 2.0
+        center = (center - arena_half) / arena_half
+
         features = np.concatenate(
             [center, rotation, centered_kpts],
             axis=1
@@ -319,16 +554,6 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
         Likelihoods aligned with reduced feature set.
         """
         T = confidences.shape[0]
-
-        # Frame corruption rule (unchanged)
-        frame_corrupted = np.any(confidences <= 0, axis=(1, 2))
-        confidences[frame_corrupted] = 0.0
-
-        confidences = np.where(
-            confidences >= self.likelihood_threshold,
-            confidences,
-            0.0
-        )
 
         if self.centeralign:
             center_idx = self.keypoint_name_to_idx[self.center_keypoint]
@@ -538,12 +763,135 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
                 return torch.cat([features, likelihoods], dim=-1)
             return features
 
+    # def preprocess(self):
+    #     """
+    #     Preprocess dataset:
+    #     - Computes per-sequence scales
+    #     - Handles variable-length sequences
+    #     - Creates sliding window samples
+    #     - Filters out windows with too many NaNs (checked BEFORE filling)
+    #     - Stores confidences if return_likelihoods is True
+    #     """
+    #     sequences = self.raw_data["sequences"]
+        
+    #     seq_keypoints = []
+    #     seq_confidences = [] if self.return_likelihoods else None
+    #     keypoints_ids = []
+    #     sequence_scales = []
+        
+    #     sub_seq_length = self.max_keypoints_len
+    #     sliding_window = self.sliding_window
+        
+    #     total_windows = 0
+    #     discarded_windows = 0
+        
+    #     for seq_ix, (seq_name, sequence) in enumerate(sequences.items()):
+    #         # Get keypoints and restrict to subset
+    #         vec_seq = sequence["keypoints"]
+    #         vec_seq = self._restrict_keypoints(vec_seq)
+            
+    #         # Get confidences if needed
+    #         conf_seq = None
+    #         if self.return_likelihoods:
+    #             conf_seq = sequence.get("confidences", None)
+    #             if conf_seq is not None:
+    #                 conf_seq = self._restrict_confidences(conf_seq)
+            
+    #         # Compute per-sequence scale (handles NaNs internally)
+    #         scale = self.compute_sequence_scale(vec_seq)
+    #         sequence_scales.append(scale)
+            
+    #         # Keep original (with NaNs) for validity checking
+    #         vec_seq_original = vec_seq.copy()
+            
+    #         # Fill holes using linear interpolation if requested
+    #         if self.fill_holes_enabled:
+    #             vec_seq_filled = self.fill_holes(vec_seq)
+    #             # Note: We don't fill holes in confidences
+    #         else:
+    #             vec_seq_filled = vec_seq
+            
+    #         # Flatten both versions
+    #         vec_seq_original_flat = vec_seq_original.reshape(vec_seq_original.shape[0], -1)
+    #         vec_seq_filled_flat = vec_seq_filled.reshape(vec_seq_filled.shape[0], -1)
+            
+    #         # Flatten confidences
+    #         if conf_seq is not None:
+    #             conf_seq = conf_seq.reshape(conf_seq.shape[0], -1)
+            
+    #         # Temporal downsampling (apply to both)
+    #         if self.sampling_rate > 1:
+    #             vec_seq_original_flat = vec_seq_original_flat[:: self.sampling_rate]
+    #             vec_seq_filled_flat = vec_seq_filled_flat[:: self.sampling_rate]
+    #             if conf_seq is not None:
+    #                 conf_seq = conf_seq[:: self.sampling_rate]
+            
+    #         # Pad sequence edges (both versions)
+    #         pad_length = min(sub_seq_length, 120)
+            
+    #         pad_vec_original = np.pad(
+    #             vec_seq_original_flat,
+    #             ((pad_length // 2, pad_length - 1 - pad_length // 2), (0, 0)),
+    #             mode="edge",
+    #         )
+            
+    #         pad_vec_filled = np.pad(
+    #             vec_seq_filled_flat,
+    #             ((pad_length // 2, pad_length - 1 - pad_length // 2), (0, 0)),
+    #             mode="edge",
+    #         )
+            
+    #         # Pad confidences
+    #         if conf_seq is not None:
+    #             pad_conf = np.pad(
+    #                 conf_seq,
+    #                 ((pad_length // 2, pad_length - 1 - pad_length // 2), (0, 0)),
+    #                 mode="edge",
+    #             )
+            
+    #         # Store the FILLED version for actual use
+    #         seq_keypoints.append(pad_vec_filled.astype(np.float32))
+    #         if conf_seq is not None:
+    #             seq_confidences.append(pad_conf.astype(np.float32))
+            
+    #         # Create sliding window sample indices
+    #         # Check validity on ORIGINAL (unfilled) version
+    #         for i in np.arange(0, len(pad_vec_original) - sub_seq_length + 1, sliding_window):
+    #             total_windows += 1
+                
+    #             # Extract window from ORIGINAL for validity check
+    #             window = pad_vec_original[i : i + sub_seq_length]
+                
+    #             # Check validity based on NaN criteria
+    #             if self.check_window_validity(window):
+    #                 keypoints_ids.append((seq_ix, i))
+    #             else:
+    #                 discarded_windows += 1
+        
+    #     # Store results
+    #     self.seq_keypoints = seq_keypoints
+    #     self.seq_confidences = seq_confidences
+    #     self.sequence_scales = np.array(sequence_scales, dtype=np.float32)
+    #     self.keypoints_ids = keypoints_ids
+    #     self.items = list(np.arange(len(keypoints_ids)))
+    #     self.n_frames = len(self.keypoints_ids)
+    #     self.discarded_windows = discarded_windows
+        
+    #     # Log statistics
+    #     if total_windows > 0:
+    #         print(f"[NaN Filter] Total windows: {total_windows}, "
+    #             f"Discarded: {discarded_windows} ({100*discarded_windows/total_windows:.1f}%), "
+    #             f"Kept: {len(keypoints_ids)}")
+        
+    #     # Clean up
+    #     del self.raw_data
     def preprocess(self):
         """
         Preprocess dataset:
         - Computes per-sequence scales
         - Handles variable-length sequences
         - Creates sliding window samples
+        - Filters out windows with too many low-likelihood frames
         - Stores confidences if return_likelihoods is True
         """
         sequences = self.raw_data["sequences"]
@@ -556,64 +904,100 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
         sub_seq_length = self.max_keypoints_len
         sliding_window = self.sliding_window
         
+        total_windows = 0
+        discarded_windows = 0
+        
         for seq_ix, (seq_name, sequence) in enumerate(sequences.items()):
             # Get keypoints and restrict to subset
             vec_seq = sequence["keypoints"]
             vec_seq = self._restrict_keypoints(vec_seq)
             
-            # Get confidences if needed
+            # ALWAYS get confidences for validity checking
+            conf_seq_for_validity = sequence.get("confidences", None)
+            if conf_seq_for_validity is not None:
+                conf_seq_for_validity = self._restrict_confidences(conf_seq_for_validity)
+            else:
+                # Create default confidences: 1.0 where valid, 0.0 where NaN
+                conf_seq_for_validity = np.ones(vec_seq.shape[:-1], dtype=np.float32)
+                nan_mask = np.any(np.isnan(vec_seq), axis=-1)
+                conf_seq_for_validity[nan_mask] = 0.0
+            
+            # Get indices for flip detection keypoints (None if not present)
+            nose_idx = self.keypoint_name_to_idx.get("nose", None)
+            tail_base_idx = self.keypoint_name_to_idx.get("tail_base", None)
+            
+            # Apply centralized reliability logic
+            vec_seq, conf_seq_for_validity = self.zero_out_confidences(
+                vec_seq, conf_seq_for_validity,
+                nose_idx=nose_idx,
+                tail_base_idx=tail_base_idx
+            )
+            
+            # Get confidences for return (only if return_likelihoods is True)
             conf_seq = None
             if self.return_likelihoods:
-                conf_seq = sequence.get("confidences", None)
-                if conf_seq is not None:
-                    conf_seq = self._restrict_confidences(conf_seq)
+                conf_seq = conf_seq_for_validity.copy()
             
-            # Compute per-sequence scale
+            # Compute per-sequence scale (handles NaNs internally)
             scale = self.compute_sequence_scale(vec_seq)
             sequence_scales.append(scale)
-
             
-            # # --- [DEBUG START] ---
-            # if seq_ix == 0:
-            #     print(f"\n[DEBUG] Preprocess Sequence 0:")
-            #     print(f"  > Keypoints shape (restricted): {vec_seq.shape}")
-            #     print(f"  > Scale computed: {scale:.4f}")
-            #     if conf_seq is not None:
-            #         print(f"  > Confidences found. Shape: {conf_seq.shape}")
-            #         print(f"  > Confidences range: [{np.nanmin(conf_seq):.2f}, {np.nanmax(conf_seq):.2f}]")
-            #     else:
-            #         print(f"  > WARNING: No confidences found (return_likelihoods={self.return_likelihoods})")
-            # # --- [DEBUG END] ---
+            # Keep original (with NaNs) for validity checking
+            vec_seq_original = vec_seq.copy()
             
-            # Fill holes if requested ...
-            
-            # Fill holes if requested
+            # Fill holes using linear interpolation if requested
             if self.fill_holes_enabled:
-                vec_seq = self.fill_holes(vec_seq)
-                # Note: We don't fill holes in confidences
+                vec_seq_filled = self.fill_holes(vec_seq)
+            else:
+                vec_seq_filled = vec_seq
             
             # Flatten keypoints
-            vec_seq = vec_seq.reshape(vec_seq.shape[0], -1)
+            vec_seq_original_flat = vec_seq_original.reshape(vec_seq_original.shape[0], -1)
+            vec_seq_filled_flat = vec_seq_filled.reshape(vec_seq_filled.shape[0], -1)
             
-            # Flatten confidences
+            # Flatten confidences for validity check
+            conf_seq_validity_flat = None
+            if conf_seq_for_validity is not None:
+                conf_seq_validity_flat = conf_seq_for_validity.reshape(conf_seq_for_validity.shape[0], -1)
+            
+            # Flatten confidences for return
             if conf_seq is not None:
                 conf_seq = conf_seq.reshape(conf_seq.shape[0], -1)
             
             # Temporal downsampling
             if self.sampling_rate > 1:
-                vec_seq = vec_seq[:: self.sampling_rate]
+                vec_seq_original_flat = vec_seq_original_flat[:: self.sampling_rate]
+                vec_seq_filled_flat = vec_seq_filled_flat[:: self.sampling_rate]
+                if conf_seq_validity_flat is not None:
+                    conf_seq_validity_flat = conf_seq_validity_flat[:: self.sampling_rate]
                 if conf_seq is not None:
                     conf_seq = conf_seq[:: self.sampling_rate]
             
             # Pad sequence edges
             pad_length = min(sub_seq_length, 120)
-            pad_vec = np.pad(
-                vec_seq,
+            
+            pad_vec_original = np.pad(
+                vec_seq_original_flat,
                 ((pad_length // 2, pad_length - 1 - pad_length // 2), (0, 0)),
                 mode="edge",
             )
             
-            # Pad confidences
+            pad_vec_filled = np.pad(
+                vec_seq_filled_flat,
+                ((pad_length // 2, pad_length - 1 - pad_length // 2), (0, 0)),
+                mode="edge",
+            )
+            
+            # Pad confidences for validity check
+            pad_conf_validity = None
+            if conf_seq_validity_flat is not None:
+                pad_conf_validity = np.pad(
+                    conf_seq_validity_flat,
+                    ((pad_length // 2, pad_length - 1 - pad_length // 2), (0, 0)),
+                    mode="edge",
+                )
+            
+            # Pad confidences for return
             if conf_seq is not None:
                 pad_conf = np.pad(
                     conf_seq,
@@ -621,26 +1005,42 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
                     mode="edge",
                 )
             
-            # Store (as individual array to handle variable lengths)
-            seq_keypoints.append(pad_vec.astype(np.float32))
+            # Store the FILLED version for actual use
+            seq_keypoints.append(pad_vec_filled.astype(np.float32))
             if conf_seq is not None:
                 seq_confidences.append(pad_conf.astype(np.float32))
             
             # Create sliding window sample indices
-            keypoints_ids.extend([
-                (seq_ix, i)
-                for i in np.arange(
-                    0, len(pad_vec) - sub_seq_length + 1, sliding_window
-                )
-            ])
+            # Check validity based on CONFIDENCES (or fall back to NaN check)
+            for i in np.arange(0, len(pad_vec_original) - sub_seq_length + 1, sliding_window):
+                total_windows += 1
+                
+                # Extract windows
+                window_kpts = pad_vec_original[i : i + sub_seq_length]
+                window_conf = None
+                if pad_conf_validity is not None:
+                    window_conf = pad_conf_validity[i : i + sub_seq_length]
+                
+                # Check validity based on likelihood criteria
+                if self.check_window_validity(window_kpts, window_conf):
+                    keypoints_ids.append((seq_ix, i))
+                else:
+                    discarded_windows += 1
         
         # Store results
-        self.seq_keypoints = seq_keypoints  # List of arrays
-        self.seq_confidences = seq_confidences  # List of confidence arrays (or None)
+        self.seq_keypoints = seq_keypoints
+        self.seq_confidences = seq_confidences
         self.sequence_scales = np.array(sequence_scales, dtype=np.float32)
         self.keypoints_ids = keypoints_ids
         self.items = list(np.arange(len(keypoints_ids)))
         self.n_frames = len(self.keypoints_ids)
+        self.discarded_windows = discarded_windows
+        
+        # Log statistics
+        if total_windows > 0:
+            print(f"[Reliability Filter] Total windows: {total_windows}, "
+                f"Discarded: {discarded_windows} ({100*discarded_windows/total_windows:.1f}%), "
+                f"Kept: {len(keypoints_ids)}")
         
         # Clean up
         del self.raw_data
@@ -709,7 +1109,11 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
         original_shape = features.shape[:-1]
         features_flat = features.reshape(-1, features.shape[-1])
 
-        center = features_flat[:, 0:2]
+        arena_half = float(self.grid_size) / 2.0
+        center = features_flat[:, 0:2] * arena_half + arena_half
+
+
+        # center = features_flat[:, 0:2]
         sin_cos = features_flat[:, 2:4]
         rotated_kpts = features_flat[:, 4:]
 
