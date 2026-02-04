@@ -26,3 +26,7 @@ dependencies = [
     "tqdm>=4.67.1",
     "wandb>=0.24.0",
 ]
+
+[tool.uv.pip]
+torch-backend = "auto"
+
