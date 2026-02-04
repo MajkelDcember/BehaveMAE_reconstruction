@@ -18,7 +18,7 @@
 # https://www.biorxiv.org/content/10.1101/2024.08.06.606796v1
 # --------------------------------------------------------
 import argparse
-import datetime
+from datetime import datetime
 import json
 import os
 import time
@@ -240,7 +240,7 @@ def get_args_parser():
     parser.add_argument("--use_wandb", action="store_true", help="Use Weights & Biases for logging")
     parser.add_argument("--wandb_project", default="hbehavemae", type=str, help="W&B project name")
     parser.add_argument("--wandb_entity", default="majkel_d_cember", type=str, help="W&B entity name")
-    parser.add_argument("--wandb_run_name", default=f"run-{datetime.now().strftime('%Y%m%d_%H%M%S')}", type=str, help="W&B run name")
+    parser.add_argument("--wandb_run_name", default=None, type=str, help="W&B run name")
     
     return parser
 
@@ -248,6 +248,9 @@ def get_args_parser():
 def main(args):
 
     misc.init_distributed_mode(args)
+
+    if args.wandb_run_name is None:
+        args.wandb_run_name = f"run-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     print("job dir: {}".format(os.path.dirname(os.path.realpath(__file__))))
     print("{}".format(args).replace(", ", ",\n"))

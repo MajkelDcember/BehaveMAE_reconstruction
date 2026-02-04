@@ -2,8 +2,9 @@
 
 import subprocess
 from datetime import datetime
+import shlex
 
-num_gpus = 2
+num_gpus = 1
 run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
 project_root = "/scratch/michal/projects/dvc_ofd_2025/code/BehaveMAE_reconstruction"
 data_root = "/scratch/michal/projects/dvc_ofd_2025/data/interim/hbmae_training_data"
@@ -61,10 +62,10 @@ if num_gpus > 1:
         f"--node_rank=0 "
         f"--master_addr=127.0.0.1 "
         f"--master_port=2999 "
-        f"run_pretrain.py {' '.join(train_args)}"
+        f"run_pretrain.py {shlex.join(train_args)}"
     )
 else:
-    training_cmd = f"cd {project_root} && OMP_NUM_THREADS=1 uv run python run_pretrain.py {' '.join(train_args)}"
+    training_cmd = f"cd {project_root} && OMP_NUM_THREADS=1 uv run python run_pretrain.py {shlex.join(train_args)}"
 
 subprocess.run([
     "runai", "submit", f"hbmae-ofd-{run_id}",
@@ -84,5 +85,6 @@ subprocess.run([
     "--environment", f"UV_PROJECT_ENVIRONMENT={project_root}/.venv",
     "--environment", f"VIRTUAL_ENV={project_root}/.venv",
     "--environment", "WANDB_API_KEY=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",
+    "--environment", "SUPPRESS_DEPRECATION_MESSAGE=true",
     "--command", "--", "/bin/bash", "-lc", training_cmd,
 ], check=True)
