@@ -18,7 +18,7 @@
 # https://www.biorxiv.org/content/10.1101/2024.08.06.606796v1
 # --------------------------------------------------------
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import os
 import time
@@ -372,6 +372,8 @@ def main(args):
             augmentations=args.augmentations,
             data_augment=args.data_augment,
             return_likelihoods=args.return_likelihoods,
+            nan_scattered_threshold=args.nan_scattered_threshold,
+            nan_concentrated_threshold=args.nan_concentrated_threshold,
         )
 
         dataset_test = PoseReconstructionDataset(
@@ -390,6 +392,8 @@ def main(args):
             augmentations=args.augmentations,
             data_augment=args.data_augment,
             return_likelihoods=args.return_likelihoods,
+            nan_scattered_threshold=args.nan_scattered_threshold,
+            nan_concentrated_threshold=args.nan_concentrated_threshold,
         )
 
     else:
@@ -554,7 +558,7 @@ def main(args):
                 f.write(json.dumps(log_stats) + "\n")
 
     total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+    total_time_str = str(timedelta(seconds=int(total_time)))
     print("Training time {}".format(total_time_str))
     print(torch.cuda.memory_allocated())
     return [checkpoint_path]

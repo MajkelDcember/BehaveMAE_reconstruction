@@ -231,7 +231,7 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
         3. Too many surrounding frames already have zero confidence (temporal domination)
         """
         FLIP_ANGLE_THRESHOLD = np.deg2rad(90.0)
-        DOMINATION_WINDOW_SIZE = 5
+        DOMINATION_WINDOW_SIZE = 25
         DOMINATION_THRESHOLD = 0.5
         BAD_CONF_THRESHOLD = 0.01
         
@@ -263,31 +263,27 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
                 confidences[i + 1] = 0.0
         
         # 3. Temporal domination: expand zero regions monotonically
+        
         conf_flat = confidences.reshape(T, -1)
-        frame_is_bad = np.any(conf_flat <= BAD_CONF_THRESHOLD, axis=1)
-        
+        initial_bad = np.any(conf_flat <= BAD_CONF_THRESHOLD, axis=1)  # freeze state after (1) and (2)
+
         half_window = DOMINATION_WINDOW_SIZE // 2
-        changed = True
-        max_iterations = T
-        
-        for _ in range(max_iterations):
-            if not changed:
-                break
-            changed = False
-            
-            for t in range(T):
-                if frame_is_bad[t]:
-                    continue
-                
-                start = max(0, t - half_window)
-                end = min(T, t + half_window + 1)
-                window_bad = frame_is_bad[start:end]
-                bad_ratio = np.mean(window_bad)
-                
-                if bad_ratio > DOMINATION_THRESHOLD:
-                    frame_is_bad[t] = True
-                    confidences[t] = 0.0
-                    changed = True
+        to_zero = np.zeros(T, dtype=bool)
+
+        for t in range(T):
+            if initial_bad[t]:
+                continue
+
+            start = max(0, t - half_window)
+            end = min(T, t + half_window + 1)
+
+            bad_ratio = np.mean(initial_bad[start:end])
+            if bad_ratio > DOMINATION_THRESHOLD:
+                to_zero[t] = True
+
+        # Apply in one shot
+        confidences[to_zero] = 0.0
+
         
         return keypoints, confidences
     
