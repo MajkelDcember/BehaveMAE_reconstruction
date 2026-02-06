@@ -899,47 +899,103 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
     # Reconstruction Utilities
     # =========================================================================
     
-    def inverse_transform(self, features, seq_idx=None, unscale=True):
-        if not self.centeralign:
-            if isinstance(features, torch.Tensor):
-                features = features.detach().cpu().numpy()
-            return features.reshape(*features.shape[:-1], self.num_keypoints, 2)
+    # def inverse_transform(self, features, seq_idx=None, unscale=True):
+    #     if not self.centeralign:
+    #         if isinstance(features, torch.Tensor):
+    #             features = features.detach().cpu().numpy()
+    #         return features.reshape(*features.shape[:-1], self.num_keypoints, 2)
+
+    #     if isinstance(features, torch.Tensor):
+    #         features = features.detach().cpu().numpy()
+
+    #     original_shape = features.shape[:-1]
+    #     features_flat = features.reshape(-1, features.shape[-1])
+
+    #     arena_half = float(self.grid_size) / 2.0
+    #     center = features_flat[:, 0:2] * arena_half + arena_half  # (N,2)
+
+    #     sin_m = features_flat[:, 2]   # sin(-θ)
+    #     cos_m = features_flat[:, 3]   # cos(-θ)
+
+    #     rotated_kpts = features_flat[:, 4:]  # (N, 2*(K-1))
+    #     if unscale and self.sequence_scales is not None and seq_idx is not None:
+    #         scale = float(self.sequence_scales[seq_idx])
+    #         if scale > 0:
+    #             rotated_kpts = rotated_kpts * scale
+
+    #     K_other = self.num_keypoints - 1
+    #     rotated_kpts = rotated_kpts.reshape(-1, K_other, 2)  # (N,K_other,2)
+
+    #     # R_inv = [[cos_m, sin_m], [-sin_m, cos_m]]
+    #     R_inv = np.stack([
+    #         np.stack([cos_m,  sin_m], axis=1),
+    #         np.stack([-sin_m, cos_m], axis=1),
+    #     ], axis=1)  # (N,2,2)
+
+    #     unrot = (R_inv @ rotated_kpts.transpose(0, 2, 1)).transpose(0, 2, 1)  # (N,K_other,2)
+    #     unrot = unrot + center[:, None, :]
+
+    #     # reinsert center keypoint
+    #     full = np.zeros((unrot.shape[0], self.num_keypoints, 2), dtype=unrot.dtype)
+    #     cidx = self.keypoint_name_to_idx[self.center_keypoint]
+    #     full[:, cidx, :] = center
+
+    #     mask = np.ones(self.num_keypoints, dtype=bool)
+    #     mask[cidx] = False
+    #     full[:, mask, :] = unrot
+
+    #     return full.reshape(original_shape + (self.num_keypoints, 2))
+    # =========================================================================
+    # Reconstruction Utilities (PURE INVERSE)
+    # =========================================================================
+
+    def inverse_transform(self, features):
+        """
+        Pure inverse of featurize_keypoints().
+        Assumes features are ALREADY in the correct scale.
+        Safe for GT, predictions, or mixed features.
+        """
 
         if isinstance(features, torch.Tensor):
             features = features.detach().cpu().numpy()
 
+        if not self.centeralign:
+            return features.reshape(*features.shape[:-1], self.num_keypoints, 2)
+
         original_shape = features.shape[:-1]
-        features_flat = features.reshape(-1, features.shape[-1])
+        feat = features.reshape(-1, features.shape[-1])  # (N, F)
 
         arena_half = float(self.grid_size) / 2.0
-        center = features_flat[:, 0:2] * arena_half + arena_half  # (N,2)
 
-        sin_m = features_flat[:, 2]   # sin(-θ)
-        cos_m = features_flat[:, 3]   # cos(-θ)
+        # --- unpack ---
+        center_norm = feat[:, 0:2]          # (N,2)
+        sin_m = feat[:, 2]                  # sin(-θ)
+        cos_m = feat[:, 3]                  # cos(-θ)
+        rot_flat = feat[:, 4:]              # (N,2*(K-1))
 
-        rotated_kpts = features_flat[:, 4:]  # (N, 2*(K-1))
-        if unscale and self.sequence_scales is not None and seq_idx is not None:
-            scale = float(self.sequence_scales[seq_idx])
-            if scale > 0:
-                rotated_kpts = rotated_kpts * scale
+        # --- center ---
+        center = center_norm * arena_half + arena_half   # (N,2)
+
+        # --- inverse rotation ---
+        R_inv = np.stack(
+            [
+                np.stack([ cos_m,  sin_m], axis=1),
+                np.stack([-sin_m,  cos_m], axis=1),
+            ],
+            axis=1
+        )  # (N,2,2)
 
         K_other = self.num_keypoints - 1
-        rotated_kpts = rotated_kpts.reshape(-1, K_other, 2)  # (N,K_other,2)
+        rot = rot_flat.reshape(-1, K_other, 2)           # (N,K-1,2)
 
-        # R_inv = [[cos_m, sin_m], [-sin_m, cos_m]]
-        R_inv = np.stack([
-            np.stack([cos_m,  sin_m], axis=1),
-            np.stack([-sin_m, cos_m], axis=1),
-        ], axis=1)  # (N,2,2)
-
-        unrot = (R_inv @ rotated_kpts.transpose(0, 2, 1)).transpose(0, 2, 1)  # (N,K_other,2)
+        unrot = (R_inv @ rot.transpose(0,2,1)).transpose(0,2,1)
         unrot = unrot + center[:, None, :]
 
-        # reinsert center keypoint
-        full = np.zeros((unrot.shape[0], self.num_keypoints, 2), dtype=unrot.dtype)
+        # --- reinsert center keypoint ---
+        full = np.zeros((unrot.shape[0], self.num_keypoints, 2), dtype=feat.dtype)
         cidx = self.keypoint_name_to_idx[self.center_keypoint]
-        full[:, cidx, :] = center
 
+        full[:, cidx, :] = center
         mask = np.ones(self.num_keypoints, dtype=bool)
         mask[cidx] = False
         full[:, mask, :] = unrot
