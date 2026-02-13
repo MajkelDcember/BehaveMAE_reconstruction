@@ -415,6 +415,25 @@ def main(args):
         ]
 
         USED_KEYPOINTS = ALL_KEYPOINTS
+        OFD_MOUSE_GROUPS = [
+            # ── Head ──────────────────────────────────────────────────────────────
+            ["nose",           "head_midpoint"],       # 0  head front
+            ["left_ear",       "left_ear_tip"],         # 1  left ear
+            ["right_ear",      "right_ear_tip"],        # 2  right ear
+            ["left_eye",       "right_eye"],            # 3  eyes
+            # ── Spine ─────────────────────────────────────────────────────────────
+            ["mid_back",       "mouse_center"],         # 4  upper spine
+            ["mid_backend",    "mid_backend2"],          # 5  mid spine
+            ["mid_backend3",   "tail_base"],             # 6  lower spine
+            # ── Tail ──────────────────────────────────────────────────────────────
+            ["tail1",          "tail2"],                 # 7  proximal tail
+            ["tail3",          "tail4"],                 # 8  mid tail
+            ["tail5",          "tail_end"],              # 9  distal tail
+            # ── Lateral ───────────────────────────────────────────────────────────
+            ["left_shoulder",  "right_shoulder"],        # 10 shoulders
+            ["left_midside",   "right_midside"],         # 11 mid-body sides
+            ["left_hip",       "right_hip"],             # 12 hips
+        ]
 
         dataset_train = PoseReconstructionDataset(
             mode="pretrain",
@@ -434,6 +453,7 @@ def main(args):
             return_likelihoods=args.return_likelihoods,
             nan_scattered_threshold=args.nan_scattered_threshold,
             nan_concentrated_threshold=args.nan_concentrated_threshold,
+            anatomical_groups=OFD_MOUSE_GROUPS,
         )
 
         dataset_test = PoseReconstructionDataset(
@@ -454,6 +474,7 @@ def main(args):
             return_likelihoods=args.return_likelihoods,
             nan_scattered_threshold=args.nan_scattered_threshold,
             nan_concentrated_threshold=args.nan_concentrated_threshold,
+            anatomical_groups=OFD_MOUSE_GROUPS,
         )
 
     else:
