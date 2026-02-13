@@ -390,15 +390,28 @@ class HBehaveMAE(GeneralizedHiera):
             # # ------------------------------------------
             
             # Apply weights to loss
-            loss = loss * weights_masked
+            LOSS_CONF_THRESHOLD = 0.5
+            # weights_masked = weights_masked * (weights_masked >= LOSS_CONF_THRESHOLD)
+            # loss = loss * weights_masked
+
             
-            # Compute mean, accounting for zero weights
-            # Only average over non-zero weighted elements
-            num_nonzero = (weights_masked > 0).sum().float()
-            if num_nonzero > 0:
-                loss = loss.sum() / num_nonzero
+            # # Compute mean, accounting for zero weights
+            # # Only average over non-zero weighted elements
+            # num_nonzero = (weights_masked > 0).sum().float()
+            # if num_nonzero > 0:
+            #     loss = loss.sum() / num_nonzero
+            # else:
+            #     loss = loss.mean()  # Fallback if all weights are zero
+            weights = weights_masked * (weights_masked >= LOSS_CONF_THRESHOLD)
+
+            weighted_loss = (pred - label)**2 * weights
+            denom = weights.sum()
+
+            if denom > 0:
+                loss = weighted_loss.sum() / denom
             else:
-                loss = loss.mean()  # Fallback if all weights are zero
+                loss = (pred - label).pow(2).mean()
+
         else:
             loss = loss.mean()
 

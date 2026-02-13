@@ -38,7 +38,8 @@ from models import models_defs
 from util import misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 from util.misc import parse_tuples, str2bool
-from datasets.reconstruct_data import PoseReconstructionDataset
+# from datasets.reconstruct_data import PoseReconstructionDataset
+from datasets.reconstruct_data2 import PoseReconstructionDataset
 
 
 def get_args_parser():
@@ -116,7 +117,7 @@ def get_args_parser():
     parser.add_argument("--input_size", default=(600, 3, 24), nargs="+", type=int)
     parser.add_argument("--stages", default=(2, 3, 4), nargs="+", type=int)
     parser.add_argument(
-        "--q_strides", default=[(5,1,1), (1, 1, 1)], type=parse_tuples
+        "--q_strides", default=[(1,1,1), (1, 1, 1)], type=parse_tuples
     )
 
     parser.add_argument(
@@ -337,6 +338,65 @@ def main(args):
             centeralign=args.centeralign,
         )
     elif args.dataset in ["ReconstructionDataset", "OFD_mouse"]:
+
+        # ------------------------------------------------------------------
+        # OFD / Pose Reconstruction dataset
+        # args.path_to_data_dir MUST point to a .npy file
+        # Train and test are handled by passing different files
+        # ------------------------------------------------------------------
+
+        ALL_KEYPOINTS = [
+            "nose", "left_ear", "right_ear", "left_ear_tip", "right_ear_tip",
+            "left_eye", "right_eye", "neck", "mid_back", "mouse_center",
+            "mid_backend", "mid_backend2", "mid_backend3", "tail_base",
+            "tail1", "tail2", "tail3", "tail4", "tail5",
+            "left_shoulder", "left_midside", "left_hip",
+            "right_shoulder", "right_midside", "right_hip",
+            "tail_end", "head_midpoint",
+        ]
+
+        USED_KEYPOINTS = ALL_KEYPOINTS
+
+        dataset_train = PoseReconstructionDataset(
+            mode="pretrain",
+            data_path=args.path_to_data_dir,     # <-- TRAIN .npy
+            keypoint_names=USED_KEYPOINTS,
+            all_keypoints=ALL_KEYPOINTS,
+            center_keypoint="neck",
+            align_keypoints=("tail_base", "neck"),
+            scale_keypoints=("nose", "tail_base"),
+            num_frames=args.num_frames,           # Added missing params
+            sliding_window=args.sliding_window,   # Added
+            sampling_rate=args.sampling_rate,     # Added
+            fill_holes=args.fill_holes, 
+            centeralign=args.centeralign,
+            augmentations=args.augmentations,
+            data_augment=args.data_augment,
+            return_likelihoods=args.return_likelihoods,
+            nan_scattered_threshold=args.nan_scattered_threshold,
+            nan_concentrated_threshold=args.nan_concentrated_threshold,
+        )
+
+        dataset_test = PoseReconstructionDataset(
+            mode="test",
+            data_path=args.test_data_path,       # <-- TEST .npy (NEW ARG)
+            keypoint_names=USED_KEYPOINTS,
+            all_keypoints=ALL_KEYPOINTS,
+            center_keypoint="neck",
+            align_keypoints=("tail_base", "neck"),
+            scale_keypoints=("nose", "tail_base"),
+            num_frames=args.num_frames,           # Added missing params
+            sliding_window=args.sliding_window,   # Added
+            sampling_rate=args.sampling_rate,     # Added
+            fill_holes=args.fill_holes, 
+            centeralign=args.centeralign,
+            augmentations=args.augmentations,
+            data_augment=args.data_augment,
+            return_likelihoods=args.return_likelihoods,
+            nan_scattered_threshold=args.nan_scattered_threshold,
+            nan_concentrated_threshold=args.nan_concentrated_threshold,
+        )
+    elif args.dataset in ["ReconstructionDataset2", "OFD2_mouse"]:
 
         # ------------------------------------------------------------------
         # OFD / Pose Reconstruction dataset
