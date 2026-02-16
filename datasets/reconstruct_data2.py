@@ -15,6 +15,7 @@ import torch.utils.data
 from torchvision import transforms
 
 from .augmentations import GaussianNoise, Reflect, Rotation
+from .keypoint_augment import KeypointAugment
 from .reconstruct_data2_utils import (
     PoseGeometryConfig,
     restrict_keypoints,
@@ -156,15 +157,22 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
         self.discarded_windows = 0
 
         # Setup augmentations
-        self.augmentations = None
+        # self.augmentations = None
+        self.keypoint_augment = None
         if augmentations:
-            gs = (self.grid_size, self.grid_size)
-            self.augmentations = transforms.Compose(
-                [
-                    Rotation(grid_size=gs, p=augmentation_p),
-                    GaussianNoise(p=augmentation_p),
-                    Reflect(grid_size=gs, p=augmentation_p),
-                ]
+            # gs = (self.grid_size, self.grid_size)
+            # self.augmentations = transforms.Compose(
+            #     [
+            #         Rotation(grid_size=gs, p=augmentation_p),
+            #         GaussianNoise(p=augmentation_p),
+            #         Reflect(grid_size=gs, p=augmentation_p),
+            #     ]
+            # )
+            # Local per-frame augmentation for denoising MAE
+            self.keypoint_augment = KeypointAugment(
+                rotation_prob=augmentation_p,
+                noise_prob=augmentation_p,
+                scale_prob=augmentation_p,
             )
 
         self.nan_scattered_threshold = nan_scattered_threshold
@@ -365,8 +373,8 @@ class PoseReconstructionDataset(torch.utils.data.Dataset):
             likelihoods = self.process_likelihoods(confidences_reshaped, seq_idx)
 
         # ── With augmentation ─────────────────────────────────────────────
-        if self.augmentations is not None and self.data_augment:
-            aug_sequence = self.augmentations(sequence_reshaped.copy())
+        if self.keypoint_augment is not None and self.data_augment:
+            aug_sequence = self.keypoint_augment(sequence_reshaped.copy())
 
             raw_features = self.featurize_keypoints(
                 sequence_reshaped.reshape(self.max_keypoints_len, -1)
