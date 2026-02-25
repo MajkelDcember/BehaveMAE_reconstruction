@@ -117,7 +117,7 @@ def get_args_parser():
     parser.add_argument("--input_size", default=(600, 3, 24), nargs="+", type=int)
     parser.add_argument("--stages", default=(2, 3, 4), nargs="+", type=int)
     parser.add_argument(
-        "--q_strides", default=[(1,1,1), (1, 1, 1)], type=parse_tuples
+        "--q_strides", default=[(5,1,1), (5, 1, 1)], type=parse_tuples
     )
 
     parser.add_argument(
@@ -453,7 +453,7 @@ def main(args):
             return_likelihoods=args.return_likelihoods,
             nan_scattered_threshold=args.nan_scattered_threshold,
             nan_concentrated_threshold=args.nan_concentrated_threshold,
-            anatomical_groups=OFD_MOUSE_GROUPS,
+            anatomical_groups=None,  # OFD_MOUSE_GROUPS,  # <-- ADDED ANATOMICAL GROUPS (NEW ARG
         )
 
         dataset_test = PoseReconstructionDataset(
@@ -474,7 +474,7 @@ def main(args):
             return_likelihoods=args.return_likelihoods,
             nan_scattered_threshold=args.nan_scattered_threshold,
             nan_concentrated_threshold=args.nan_concentrated_threshold,
-            anatomical_groups=OFD_MOUSE_GROUPS,
+            anatomical_groups=None,
         )
 
     else:
