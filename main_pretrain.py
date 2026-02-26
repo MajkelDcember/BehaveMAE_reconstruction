@@ -40,6 +40,8 @@ from util.misc import NativeScalerWithGradNormCount as NativeScaler
 from util.misc import parse_tuples, str2bool
 # from datasets.reconstruct_data import PoseReconstructionDataset
 from datasets.reconstruct_data2 import PoseReconstructionDataset
+# Add this alongside your other dataset imports
+from datasets.kptmoseq_data import KeypointMoSeqDataset 
 
 
 def get_args_parser():
@@ -247,6 +249,11 @@ def get_args_parser():
      
     parser.add_argument("--nan_scattered_threshold", default=0.4, type=float)
     parser.add_argument("--nan_concentrated_threshold", default=0.05, type=float)
+    # Add these under the dataset arguments section
+    parser.add_argument("--keypoint_names", nargs="+", type=str, required=True,
+                        help="List of keypoint names to use from the dataset")
+    parser.add_argument("--scale_target", default=25.0, type=float,
+                        help="Target median distance for scale normalization")
     
     return parser
 
@@ -476,6 +483,33 @@ def main(args):
             nan_concentrated_threshold=args.nan_concentrated_threshold,
             anatomical_groups=None,
         )
+    elif args.dataset == "keypoint_moseq":
+        args.data_augment = False
+
+        dataset_train = KeypointMoSeqDataset(
+            data_path=args.path_to_data_dir,     
+            keypoint_names=args.keypoint_names,  # <-- Passed from command line
+            num_frames=args.num_frames,
+            sliding_window=args.sliding_window,
+            scale_target=args.scale_target,
+            return_likelihoods=args.return_likelihoods,
+        )
+
+        if args.test_data_path:
+            dataset_test = KeypointMoSeqDataset(
+                data_path=args.test_data_path,       
+                keypoint_names=args.keypoint_names,  # <-- Passed from command line
+                num_frames=args.num_frames,
+                sliding_window=args.sliding_window,
+                scale_target=args.scale_target,
+                return_likelihoods=args.return_likelihoods,
+            )
+        else:
+            dataset_test = None
+
+        # CRITICAL FIX: Ensure model F dimension perfectly matches dataset F dimension
+        args.input_size = (args.num_frames, 1, dataset_train.feature_dim)
+        args.patch_kernel = (args.patch_kernel[0], args.patch_kernel[1], dataset_train.feature_dim)
 
     else:
         print(f"Dataset {args.dataset} unknown...")
