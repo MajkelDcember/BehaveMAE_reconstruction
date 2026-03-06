@@ -119,7 +119,7 @@ def get_args_parser():
     parser.add_argument("--input_size", default=(600, 3, 24), nargs="+", type=int)
     parser.add_argument("--stages", default=(2, 3, 4), nargs="+", type=int)
     parser.add_argument(
-        "--q_strides", default=[(5,1,1), (5, 1, 1)], type=parse_tuples
+        "--q_strides", default=[(10,1,1), (30, 1, 1)], type=parse_tuples
     )
 
     parser.add_argument(
